@@ -26,7 +26,8 @@ export function BoardPage() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [sortMode, setSortMode] = useState<"due" | "title">("due");
+  const [sortKey, setSortKey] = useState<"due" | "title">("due");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
@@ -144,35 +145,64 @@ export function BoardPage() {
     }
   }
 
+  // Bubble layout order: due date (stable) to reduce overlap and keep placement predictable.
+  const layoutOrder = useMemo(() => {
+    return [...tasks].sort((a, b) => {
+      const dueCmp = a.due_date.localeCompare(b.due_date);
+      if (dueCmp !== 0) return dueCmp;
+      return b.created_at.localeCompare(a.created_at);
+    });
+  }, [tasks]);
+
   const bubbles = useMemo(() => {
     const seed = workspaceId;
     const now = Date.now();
-    return tasks.map((t) => {
+    const n = Math.max(1, layoutOrder.length);
+    const cols = Math.max(2, Math.ceil(Math.sqrt(n)));
+    const rows = Math.ceil(n / cols);
+    const marginX = 14;
+    const marginY = 18;
+    const cellW = (100 - marginX * 2) / cols;
+    const cellH = (100 - marginY * 2) / rows;
+
+    return layoutOrder.map((t, i) => {
       const h = hash(seed + t.id);
-      // Keep bubbles well inside the canvas so drift doesn't clip them.
-      const x = (h % 64) + 18; // 18..82
-      const y = ((h / 97) % 56) + 22; // 22..78
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const jx = ((h % 1000) / 1000 - 0.5) * cellW * 0.28;
+      const jy = (((h / 1000) % 1000) / 1000 - 0.5) * cellH * 0.28;
+      const x = marginX + cellW * (col + 0.5) + jx;
+      const y = marginY + cellH * (row + 0.5) + jy;
+
       const daysUntilDue = Math.ceil((new Date(t.due_date).getTime() - now) / (1000 * 60 * 60 * 24));
-      const size = clamp(160 - daysUntilDue * 10, 76, 168);
-      const hue = clamp(185 - daysUntilDue * 8, 10, 200); // closer due -> warmer
-      const drift = 8 + (h % 10);
-      const dur = 10 + (h % 9);
-      const delay = (h % 13) * -0.35;
-      return { t, x, y, size, hue, drift, dur, delay };
+      const size = clamp(150 - daysUntilDue * 10, 72, 150);
+      const hue = clamp(185 - daysUntilDue * 8, 10, 200);
+
+      // Give each bubble its own drift vector so they don't move in the same path.
+      const dx = ((h % 2 === 0 ? 1 : -1) * (6 + (h % 7))) as number;
+      const dy = (((h / 7) % 2 === 0 ? 1 : -1) * (6 + ((h / 13) % 7))) as number;
+      const dur = 11 + (h % 10);
+      const delay = (h % 11) * -0.25;
+
+      return { t, x, y, size, hue, dx, dy, dur, delay };
     });
-  }, [tasks, workspaceId]);
+  }, [layoutOrder, workspaceId]);
 
   const filteredSorted = useMemo(() => {
     const q = query.trim().toLowerCase();
     const list = q ? tasks.filter((t) => t.title.toLowerCase().includes(q)) : tasks;
     const sorted = [...list].sort((a, b) => {
-      if (sortMode === "title") return a.title.localeCompare(b.title);
+      if (sortKey === "title") {
+        const cmp = a.title.toLowerCase().localeCompare(b.title.toLowerCase());
+        return sortDir === "asc" ? cmp : -cmp;
+      }
       const dueCmp = a.due_date.localeCompare(b.due_date);
       if (dueCmp !== 0) return dueCmp;
-      return b.created_at.localeCompare(a.created_at);
+      const cmp = b.created_at.localeCompare(a.created_at);
+      return sortDir === "asc" ? cmp : -cmp;
     });
     return sorted;
-  }, [tasks, query, sortMode]);
+  }, [tasks, query, sortKey, sortDir]);
 
   if (loading) {
     return (
@@ -186,7 +216,7 @@ export function BoardPage() {
 
   return (
     <div className="boardScreen">
-      <div className="boardHeader">
+      <div className="boardHeader slim">
         <div className="boardHeaderLeft">
           <div className="kicker">Workspace</div>
           <div className="boardHeaderTitle">{workspace?.name ?? "Board"}</div>
@@ -218,17 +248,29 @@ export function BoardPage() {
             <div className="segmented">
               <button
                 type="button"
-                className={`segBtn ${sortMode === "due" ? "active" : ""}`}
-                onClick={() => setSortMode("due")}
+                className={`segBtn ${sortKey === "due" ? "active" : ""}`}
+                onClick={() => {
+                  if (sortKey === "due") setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+                  else {
+                    setSortKey("due");
+                    setSortDir("asc");
+                  }
+                }}
               >
-                Due
+                Due {sortKey === "due" ? (sortDir === "asc" ? "↑" : "↓") : ""}
               </button>
               <button
                 type="button"
-                className={`segBtn ${sortMode === "title" ? "active" : ""}`}
-                onClick={() => setSortMode("title")}
+                className={`segBtn ${sortKey === "title" ? "active" : ""}`}
+                onClick={() => {
+                  if (sortKey === "title") setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+                  else {
+                    setSortKey("title");
+                    setSortDir("asc");
+                  }
+                }}
               >
-                Title
+                Title {sortKey === "title" ? (sortDir === "asc" ? "↑" : "↓") : ""}
               </button>
             </div>
           </div>
@@ -262,7 +304,7 @@ export function BoardPage() {
 
         <div className="bubbleCanvas">
           <div className="gridOverlay" aria-hidden="true" />
-          {bubbles.map(({ t, x, y, size, hue, drift, dur, delay }) => (
+          {bubbles.map(({ t, x, y, size, hue, dx, dy, dur, delay }) => (
             <button
               key={t.id}
               className={`taskBubble ${t.id === selectedId ? "selected" : ""}`}
@@ -274,7 +316,8 @@ export function BoardPage() {
                   width: `${size}px`,
                   height: `${size}px`,
                   ["--hue" as never]: hue,
-                  ["--drift" as never]: `${drift}px`,
+                  ["--dx" as never]: `${dx}px`,
+                  ["--dy" as never]: `${dy}px`,
                   ["--dur" as never]: `${dur}s`,
                   ["--delay" as never]: `${delay}s`,
                 } as never
