@@ -6,6 +6,7 @@ import { AuthPage } from "./pages/AuthPage";
 import { WorkspacesPage } from "./pages/WorkspacesPage";
 import { BoardPage } from "./pages/BoardPage";
 import { ProfilePage } from "./pages/ProfilePage";
+import { ChatPage } from "./pages/ChatPage";
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -122,6 +123,18 @@ function AuthedRouter({ session }: { session: Session | null }) {
           )
         }
       />
+      <Route
+        path="/chat"
+        element={
+          session ? (
+            <AuthedFrame onSignOut={signOut}>
+              <ChatPage />
+            </AuthedFrame>
+          ) : (
+            <Navigate to="/auth" replace />
+          )
+        }
+      />
       <Route path="*" element={<Navigate to={session ? "/workspaces" : "/auth"} replace />} />
     </Routes>
   );
@@ -131,7 +144,7 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
   const supabase = getSupabase();
   const loc = useLocation();
   const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [isEmailConfirmed, setIsEmailConfirmed] = useState<boolean | null>(null);
+  const [displayName, setDisplayName] = useState<string | null>(null);
   const [notifOpen, setNotifOpen] = useState(false);
 
   useEffect(() => {
@@ -139,15 +152,20 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
       const u = data.user;
       if (!u) return;
       setUserEmail(u.email ?? null);
-      const confirmedAt = (u as unknown as { email_confirmed_at?: string | null; confirmed_at?: string | null })
-        .email_confirmed_at ?? (u as unknown as { confirmed_at?: string | null }).confirmed_at ?? null;
-      setIsEmailConfirmed(Boolean(confirmedAt));
+      // load display_name for header
+      supabase
+        .from("profiles")
+        .select("display_name")
+        .eq("id", u.id)
+        .maybeSingle()
+        .then(({ data: p }) => setDisplayName(p?.display_name ?? null));
     });
   }, [supabase]);
 
   const onBoard = loc.pathname.startsWith("/w/");
 
-  const meInitials = userEmail ? userEmail.split("@")[0].slice(0, 2).toUpperCase() : "ME";
+  const username = displayName?.trim() || (userEmail ? userEmail.split("@")[0] : "me");
+  const meInitials = username.slice(0, 2).toUpperCase();
 
   return (
     <div className="appShell">
@@ -162,9 +180,8 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
             Workspaces
           </Link>
           <div className={`navPill ${onBoard ? "active" : "disabled"}`}>Tasks</div>
-          <div className="navPill disabled">Chat</div>
-          <Link className={`navPill ${loc.pathname === "/profile" ? "active" : ""}`} to="/profile">
-            Profile
+          <Link className={`navPill ${loc.pathname === "/chat" ? "active" : ""}`} to="/chat">
+            Chat
           </Link>
         </div>
 
@@ -186,11 +203,10 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
           </div>
         ) : null}
 
-        <div className="avatarCircle" title={userEmail ?? "User"}>
-          {meInitials}
-        </div>
-
-        {/* confirmation status is shown on the Profile page (not in the header) */}
+        <Link className="userLink" to="/profile" title="Open profile">
+          <div className="avatarCircle">{meInitials}</div>
+          <div className="userNameText">{username}</div>
+        </Link>
 
         <button className="secondaryBtn headerBtn" onClick={onSignOut} type="button">
           Sign out

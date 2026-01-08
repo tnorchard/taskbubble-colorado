@@ -76,70 +76,59 @@ export function WorkspacesPage() {
   }
 
   return (
-    <div className="screen">
-      <div className="screenInner">
-        <div className="headerRow">
-          <div>
-            <div className="kicker">Workspaces</div>
-            <h1 className="h1">Choose where you want to work.</h1>
-            <div className="muted">
-              You’re automatically enrolled in <b>Home</b>. Create or join more workspaces any time.
-            </div>
-          </div>
+    <div className="screen wsScreen">
+      <div className="wsCenter">
+        <div className="wsHero">
+          <div className="kicker">Workspaces</div>
+          <div className="wsTitle">Pick a workspace to open your bubbles.</div>
+          <div className="muted">Home is created automatically. You can create or join more any time.</div>
         </div>
 
-        <div className="grid2">
-          <div className="panel">
-            <div className="panelTitle">Your workspaces</div>
+        <div className="wsCardShell">
+          <div className="wsCardHeader">
+            <div className="wsCardTitle">Your workspaces</div>
             {loading ? <div className="muted">Loading…</div> : null}
-            {error ? <div className="errorBox">{error}</div> : null}
-
-            <div className="wsList">
-              {sorted.map((w) => (
-                <button key={w.id} className="wsCard" onClick={() => openWorkspace(w.id)} type="button">
-                  <div className="wsName">{w.name}</div>
-                  <div className="wsMeta">{w.member_count ?? 0} member(s)</div>
-                  <div className="wsGo">Open →</div>
-                </button>
-              ))}
-              {!loading && sorted.length === 0 ? <div className="muted">No workspaces yet.</div> : null}
-            </div>
           </div>
 
-          <div className="panel">
-            <div className="panelTitle">Join or create</div>
+          {error ? <div className="errorBox">{error}</div> : null}
 
-            <div className="split">
-              <div className="miniPanel">
-                <div className="miniTitle">Create a workspace</div>
-                <label className="field">
-                  <div className="fieldLabel">Name</div>
-                  <input value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="Design Team" />
-                </label>
-                <button
-                  className="primaryBtn btnFull"
-                  onClick={createWorkspace}
-                  type="button"
-                  disabled={busy || !createName.trim()}
-                >
-                  Create
-                </button>
-              </div>
+          <div className="wsGrid">
+            {sorted.map((w) => (
+              <button key={w.id} className="wsTile" onClick={() => openWorkspace(w.id)} type="button">
+                <div className="wsTileTop">
+                  <div className="wsName">{w.name}</div>
+                  <div className="wsCount">{w.member_count ?? 0}</div>
+                </div>
+                <div className="wsMeta">{w.member_count ?? 0} member(s)</div>
+                <div className="wsGo">Open →</div>
+              </button>
+            ))}
+            {!loading && sorted.length === 0 ? <div className="muted">No workspaces yet.</div> : null}
+          </div>
 
-              <div className="miniPanel">
-                <div className="miniTitle">Join with a code</div>
-                <label className="field">
-                  <div className="fieldLabel">Code</div>
-                  <input value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="e.g. 7a2c91bf10" />
-                </label>
-                <button className="secondaryBtn btnFull" onClick={joinWorkspace} type="button" disabled={busy || !joinCode.trim()}>
-                  Join
-                </button>
-              </div>
+          <div className="wsDivider" />
+
+          <div className="wsActions">
+            <div className="miniPanel wsMini">
+              <div className="miniTitle">Create</div>
+              <label className="field">
+                <div className="fieldLabel">Workspace name</div>
+                <input value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="Design Team" />
+              </label>
+              <button className="primaryBtn btnFull" onClick={createWorkspace} type="button" disabled={busy || !createName.trim()}>
+                Create workspace
+              </button>
             </div>
 
-            <div className="muted" style={{ marginTop: 12 }}>
-              Tip: click a workspace card to open the bubble board.
+            <div className="miniPanel wsMini">
+              <div className="miniTitle">Join</div>
+              <label className="field">
+                <div className="fieldLabel">Join code</div>
+                <input value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="e.g. 7a2c91bf10" />
+              </label>
+              <button className="secondaryBtn btnFull" onClick={joinWorkspace} type="button" disabled={busy || !joinCode.trim()}>
+                Join workspace
+              </button>
             </div>
           </div>
         </div>

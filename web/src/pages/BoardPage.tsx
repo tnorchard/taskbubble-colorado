@@ -149,12 +149,13 @@ export function BoardPage() {
     const now = Date.now();
     return tasks.map((t) => {
       const h = hash(seed + t.id);
-      const x = (h % 86) + 7; // 7..93
-      const y = ((h / 97) % 70) + 15; // 15..85
+      // Keep bubbles well inside the canvas so drift doesn't clip them.
+      const x = (h % 64) + 18; // 18..82
+      const y = ((h / 97) % 56) + 22; // 22..78
       const daysUntilDue = Math.ceil((new Date(t.due_date).getTime() - now) / (1000 * 60 * 60 * 24));
       const size = clamp(160 - daysUntilDue * 10, 76, 168);
       const hue = clamp(185 - daysUntilDue * 8, 10, 200); // closer due -> warmer
-      const drift = 14 + (h % 22);
+      const drift = 8 + (h % 10);
       const dur = 10 + (h % 9);
       const delay = (h % 13) * -0.35;
       return { t, x, y, size, hue, drift, dur, delay };
