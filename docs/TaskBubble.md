@@ -14,6 +14,7 @@ The core differentiator is the **interactive bubble UI** (not a list/table) whil
 ### Authentication
 - A user can **create an account**.
 - A user can **sign in**.
+- Email confirmation is optional. If a user is not confirmed, the app should display **not confirmed** in their profile/header.
 
 ### Workspaces
 TaskBubble is organized around **workspaces** (teams/boards).
