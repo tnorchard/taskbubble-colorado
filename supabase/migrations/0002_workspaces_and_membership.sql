@@ -2,6 +2,10 @@
 
 create extension if not exists "pgcrypto";
 
+-- Drop the old view (created in 0001) before tasks schema changes.
+-- `create or replace view` can't change the shape when using `t.*` and new columns are added.
+drop view if exists public.tasks_with_age;
+
 -- Workspaces
 create table if not exists public.workspaces (
   id uuid primary key default gen_random_uuid(),
@@ -84,6 +88,18 @@ declare
 begin
   home_id := public.ensure_home_workspace();
   update public.tasks set workspace_id = home_id where workspace_id is null;
+end $$;
+
+-- Ensure existing users (created before this migration) are enrolled in Home
+do $$
+declare
+  home_id uuid;
+begin
+  home_id := public.ensure_home_workspace();
+  insert into public.workspace_members (workspace_id, user_id, role)
+  select home_id, u.id, 'member'
+  from auth.users u
+  on conflict do nothing;
 end $$;
 
 alter table public.tasks
