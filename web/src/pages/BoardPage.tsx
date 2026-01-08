@@ -19,7 +19,7 @@ export function BoardPage() {
   const workspaceId = id ?? "";
 
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [tasks, setTasks] = useState<TaskWithAge[]>([]);
+  const [tasks, setTasks] = useState<(TaskWithAge & { creator_profile?: Profile | null })[]>([]);
   const [members, setMembers] = useState<Array<{ member: WorkspaceMember; profile: Profile | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -83,7 +83,9 @@ export function BoardPage() {
     setTasks((t ?? []) as TaskWithAge[]);
 
     const membersRaw = (m ?? []) as WorkspaceMember[];
-    const userIds = Array.from(new Set(membersRaw.map((x) => x.user_id)));
+    const userIds = Array.from(
+      new Set([...membersRaw.map((x) => x.user_id), ...(t ?? []).map((task) => task.created_by)]),
+    );
     if (userIds.length) {
       const { data: profilesData } = await supabase
         .from("profiles")
@@ -92,8 +94,11 @@ export function BoardPage() {
       const profiles = (profilesData ?? []) as Profile[];
       const byId = new Map(profiles.map((p) => [p.id, p]));
       setMembers(membersRaw.map((mem) => ({ member: mem, profile: byId.get(mem.user_id) ?? null })));
+      // attach creator profiles to tasks
+      setTasks((t ?? []).map((task) => ({ ...task, creator_profile: byId.get(task.created_by) ?? null })));
     } else {
       setMembers([]);
+      setTasks((t ?? []) as TaskWithAge[]);
     }
 
     setLoading(false);
@@ -247,6 +252,7 @@ export function BoardPage() {
                 <div className="taskRowMeta">
                   <span className="chip">{formatAgeHours(t.age_hours)}</span>
                   <span className="chip">{formatDue(t.due_date)}</span>
+                  {t.creator_profile ? <span className="chip">{t.creator_profile.display_name ?? t.creator_profile.email}</span> : null}
                 </div>
               </button>
             ))}

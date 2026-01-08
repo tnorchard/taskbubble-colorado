@@ -36,4 +36,8 @@ export type WorkspaceMember = {
   created_at: string;
 };
 
+export type WorkspaceWithMeta = Workspace & {
+  member_count?: number;
+};
+
 

@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getSupabase } from "../lib/supabaseClient";
-import type { Workspace } from "../types";
+import type { Workspace, WorkspaceWithMeta } from "../types";
 
 export function WorkspacesPage() {
   const supabase = getSupabase();
   const nav = useNavigate();
 
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceWithMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,14 +25,25 @@ export function WorkspacesPage() {
     setError(null);
     const { data, error: e } = await supabase
       .from("workspaces")
-      .select("id,name,join_code,created_at")
+      .select("id,name,created_at")
       .order("created_at", { ascending: true });
     if (e) {
       setError(e.message);
       setLoading(false);
       return;
     }
-    setWorkspaces((data ?? []) as Workspace[]);
+    const ws = (data ?? []) as WorkspaceWithMeta[];
+    if (ws.length) {
+      const ids = ws.map((w) => w.id);
+      const { data: memData } = await supabase
+        .from("workspace_members")
+        .select("workspace_id, user_id")
+        .in("workspace_id", ids);
+      const counts = new Map<string, number>();
+      (memData ?? []).forEach((m) => counts.set(m.workspace_id, (counts.get(m.workspace_id) ?? 0) + 1));
+      ws.forEach((w) => (w.member_count = counts.get(w.id) ?? 0));
+    }
+    setWorkspaces(ws);
     setLoading(false);
   }
 
@@ -87,7 +98,7 @@ export function WorkspacesPage() {
               {sorted.map((w) => (
                 <button key={w.id} className="wsCard" onClick={() => openWorkspace(w.id)} type="button">
                   <div className="wsName">{w.name}</div>
-                  <div className="wsMeta">Join code: {w.join_code}</div>
+                  <div className="wsMeta">{w.member_count ?? 0} member(s)</div>
                   <div className="wsGo">Open →</div>
                 </button>
               ))}
