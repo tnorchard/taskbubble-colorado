@@ -13,7 +13,20 @@ export default function App() {
   const [loadingSession, setLoadingSession] = useState(true);
 
   useEffect(() => {
-    const supabase = getSupabase();
+    if (!isSupabaseConfigured) {
+      // Don't call Supabase client at all if env vars aren't loaded
+      setLoadingSession(false);
+      return;
+    }
+
+    let supabase;
+    try {
+      supabase = getSupabase();
+    } catch (e) {
+      // If something went wrong creating the client, don't blank the app.
+      // ErrorBoundary will show the message.
+      throw e;
+    }
     let isMounted = true;
     supabase.auth.getSession().then(({ data }) => {
       if (!isMounted) return;
@@ -146,6 +159,7 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState<string | null>(null);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [lastWorkspaceId, setLastWorkspaceId] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -162,6 +176,20 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
     });
   }, [supabase]);
 
+  // Keep "Workspace" pill pointed at the last opened workspace.
+  useEffect(() => {
+    const read = () => {
+      try {
+        setLastWorkspaceId(localStorage.getItem("tb:lastWorkspaceId"));
+      } catch {
+        setLastWorkspaceId(null);
+      }
+    };
+    read();
+    window.addEventListener("storage", read);
+    return () => window.removeEventListener("storage", read);
+  }, []);
+
   const onBoard = loc.pathname.startsWith("/w/");
 
   const username = displayName?.trim() || (userEmail ? userEmail.split("@")[0] : "me");
@@ -172,14 +200,23 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
       <div className="appTopbar">
         <div className="brandRow">
           <div className="logoMark sm">TB</div>
-          <div className="brandText">TaskBubbles</div>
+          <div className="brandText">TaskBubble</div>
         </div>
 
         <div className="navPills">
           <Link className={`navPill ${loc.pathname === "/workspaces" ? "active" : ""}`} to="/workspaces">
-            Workspaces
+            Home
           </Link>
-          <div className={`navPill ${onBoard ? "active" : "disabled"}`}>Tasks</div>
+          <Link
+            className={`navPill ${onBoard ? "active" : ""} ${!lastWorkspaceId ? "disabled" : ""}`}
+            to={lastWorkspaceId ? `/w/${lastWorkspaceId}` : "/workspaces"}
+            aria-disabled={!lastWorkspaceId}
+            onClick={(e) => {
+              if (!lastWorkspaceId) e.preventDefault();
+            }}
+          >
+            Workspace
+          </Link>
           <Link className={`navPill ${loc.pathname === "/chat" ? "active" : ""}`} to="/chat">
             Chat
           </Link>

@@ -11,9 +11,15 @@ export type Task = {
   id: string;
   title: string;
   description: string;
-  due_date: string; // YYYY-MM-DD
+  due_date: string | null; // YYYY-MM-DD (nullable when ASAP)
+  is_asap?: boolean;
   status: TaskStatus;
   created_at: string;
+  updated_at?: string;
+  completed_at?: string | null;
+  completed_by?: string | null;
+  responsible_id?: string | null;
+  company?: string | null;
   created_by: string;
   workspace_id: string;
 };
@@ -38,6 +44,7 @@ export type WorkspaceMember = {
 
 export type WorkspaceWithMeta = Workspace & {
   member_count?: number;
+  task_count?: number;
 };
 
 

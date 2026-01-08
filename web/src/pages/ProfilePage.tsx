@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { getSupabase } from "../lib/supabaseClient";
-import type { Profile, Task, Workspace } from "../types";
+import type { Profile, Task } from "../types";
 
 type TaskWithWorkspace = Task & { workspace_name?: string };
 
@@ -8,13 +8,10 @@ export function ProfilePage() {
   const supabase = getSupabase();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [tasks, setTasks] = useState<TaskWithWorkspace[]>([]);
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [displayName, setDisplayName] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-
-  const workspaceById = useMemo(() => new Map(workspaces.map((w) => [w.id, w])), [workspaces]);
 
   useEffect(() => {
     void load();
@@ -41,8 +38,7 @@ export function ProfilePage() {
     if (profErr) setError(profErr.message);
     setProfile((profData as Profile) ?? null);
     setDisplayName(profData?.display_name ?? "");
-    const ws = (wsData ?? []) as Workspace[];
-    setWorkspaces(ws);
+    const ws = (wsData ?? []) as Array<{ id: string; name: string }>;
     const wsMap = new Map(ws.map((w) => [w.id, w]));
     const mine = (taskData ?? []).filter((t) => t.created_by === uid) as TaskWithWorkspace[];
     mine.forEach((t) => {

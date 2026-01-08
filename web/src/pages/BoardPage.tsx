@@ -19,7 +19,8 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-function formatDue(d: string) {
+function formatDue(d: string | null | undefined, isAsap?: boolean) {
+  if (isAsap || !d) return "ASAP";
   const dt = new Date(d + "T00:00:00");
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
@@ -35,6 +36,16 @@ function formatAgeHours(age: number) {
   return rem ? `${days}d ${rem}h` : `${days}d`;
 }
 
+function formatDateTime(d: string) {
+  const dt = new Date(d);
+  return dt.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function initials(name: string) {
   const n = name.includes("@") ? name.split("@")[0] : name;
   const parts = n
@@ -46,7 +57,11 @@ function initials(name: string) {
   return (a + b).toUpperCase();
 }
 
-type RowTask = TaskWithAge & { creator_profile?: Profile | null };
+type RowTask = TaskWithAge & {
+  creator_profile?: Profile | null;
+  completed_profile?: Profile | null;
+  responsible_profile?: Profile | null;
+};
 
 type SimNode = {
   x: number;
@@ -75,16 +90,44 @@ export function BoardPage() {
 
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
+  const [asap, setAsap] = useState(false);
   const [description, setDescription] = useState("");
+  const [responsibleId, setResponsibleId] = useState("");
+  const [company, setCompany] = useState("");
   const [creating, setCreating] = useState(false);
 
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editDueDate, setEditDueDate] = useState("");
+  const [editAsap, setEditAsap] = useState(false);
   const [editDescription, setEditDescription] = useState("");
+  const [editResponsibleId, setEditResponsibleId] = useState("");
+  const [editCompany, setEditCompany] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const [viewMode, setViewMode] = useState<"board" | "calendar">("board");
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+
   const [popping, setPopping] = useState<Set<string>>(() => new Set());
+
+  const userColors = useMemo(() => {
+    const map = new Map<string, string>();
+    const palette = [
+      "#64b5ff", // blue
+      "#a885ff", // purple
+      "#ff85a1", // pink
+      "#ffb385", // orange
+      "#85ff9e", // green
+      "#85fff3", // teal
+      "#ffeb85", // yellow
+      "#ff85f3", // magenta
+    ];
+    members.forEach(({ member }) => {
+      const h = hash(member.user_id);
+      map.set(member.user_id, palette[h % palette.length]);
+    });
+    return map;
+  }, [members]);
 
   const selected = useMemo(
     () => tasks.find((t) => t.id === selectedId) ?? null,
@@ -116,12 +159,13 @@ export function BoardPage() {
       .eq("id", workspaceId)
       .maybeSingle();
 
+    // NOTE: We query from `tasks` (not `tasks_with_age`) to avoid hard dependency on view schema.
+    // We'll compute `age_hours` client-side so the UI doesn't crash if a migration hasn't been applied yet.
     const tReq = supabase
-      .from("tasks_with_age")
-      .select(
-        "id,title,description,due_date,status,created_at,created_by,workspace_id,age_hours",
-      )
+      .from("tasks")
+      .select("*")
       .eq("workspace_id", workspaceId)
+      .is("deleted_at", null)
       .order("due_date", { ascending: true })
       .order("created_at", { ascending: false });
 
@@ -147,7 +191,13 @@ export function BoardPage() {
     const userIds = Array.from(
       new Set([
         ...membersRaw.map((x) => x.user_id),
-        ...(t ?? []).map((task) => task.created_by),
+        ...(t ?? []).map((task: any) => task.created_by),
+        ...(t ?? [])
+          .map((task: any) => task.completed_by)
+          .filter((id: any): id is string => Boolean(id)),
+        ...(t ?? [])
+          .map((task: any) => task.responsible_id)
+          .filter((id: any): id is string => Boolean(id)),
       ]),
     );
 
@@ -165,15 +215,35 @@ export function BoardPage() {
           profile: byId.get(mem.user_id) ?? null,
         })),
       );
+      const now = Date.now();
       setTasks(
-        (t ?? []).map((task) => ({
+        (t ?? []).map((task: any) => ({
           ...task,
+          age_hours:
+            typeof task.created_at === "string"
+              ? (now - new Date(task.created_at).getTime()) / 3600000
+              : 0,
           creator_profile: byId.get(task.created_by) ?? null,
+          completed_profile: task.completed_by
+            ? byId.get(task.completed_by) ?? null
+            : null,
+          responsible_profile: task.responsible_id
+            ? byId.get(task.responsible_id) ?? null
+            : null,
         })) as RowTask[],
       );
     } else {
       setMembers([]);
-      setTasks((t ?? []) as RowTask[]);
+      const now = Date.now();
+      setTasks(
+        (t ?? []).map((task: any) => ({
+          ...task,
+          age_hours:
+            typeof task.created_at === "string"
+              ? (now - new Date(task.created_at).getTime()) / 3600000
+              : 0,
+        })) as RowTask[],
+      );
     }
 
     setLoading(false);
@@ -181,14 +251,22 @@ export function BoardPage() {
 
   useEffect(() => {
     if (!workspaceId) return;
+    try {
+      localStorage.setItem("tb:lastWorkspaceId", workspaceId);
+    } catch {
+      // ignore storage errors
+    }
     void load();
   }, [workspaceId]);
 
   useEffect(() => {
     if (!selected) return;
     setEditTitle(selected.title);
-    setEditDueDate(selected.due_date);
+    setEditDueDate(selected.due_date ?? "");
+    setEditAsap(Boolean(selected.is_asap));
     setEditDescription(selected.description);
+    setEditResponsibleId(selected.responsible_id ?? "");
+    setEditCompany(selected.company ?? "");
     setIsEditing(false);
   }, [selected]);
 
@@ -234,16 +312,22 @@ export function BoardPage() {
       const { error: e } = await supabase.from("tasks").insert({
         title: title.trim(),
         description: description.trim(),
-        due_date: dueDate,
+        due_date: asap ? null : dueDate,
         created_by: uid,
         workspace_id: workspaceId,
         status: "open" satisfies TaskStatus,
+        responsible_id: responsibleId || null,
+        company: company || null,
+        is_asap: asap,
       });
       if (e) throw new Error(e.message);
 
       setTitle("");
       setDueDate("");
+      setAsap(false);
       setDescription("");
+      setResponsibleId("");
+      setCompany("");
       // realtime will refresh, but do an eager refresh for responsiveness
       await load();
     } catch (e) {
@@ -262,8 +346,11 @@ export function BoardPage() {
         .from("tasks")
         .update({
           title: editTitle.trim(),
-          due_date: editDueDate,
+          due_date: editAsap ? null : editDueDate,
           description: editDescription.trim(),
+          responsible_id: editResponsibleId || null,
+          company: editCompany || null,
+          is_asap: editAsap,
         })
         .eq("id", selected.id);
       if (e) throw new Error(e.message);
@@ -298,9 +385,34 @@ export function BoardPage() {
   async function setTaskStatus(taskId: string, next: TaskStatus) {
     const prev = tasks.find((t) => t.id === taskId)?.status ?? "open";
 
+    const { data: userData } = await supabase.auth.getUser();
+    const uid = userData.user?.id ?? null;
+    const nowIso = new Date().toISOString();
+    const meProfile = uid
+      ? members.find((m) => m.member.user_id === uid)?.profile ?? null
+      : null;
+
     // Optimistic UI
     setTasks((cur) =>
-      cur.map((t) => (t.id === taskId ? { ...t, status: next } : t)),
+      cur.map((t) =>
+        t.id !== taskId
+          ? t
+          : next === "done"
+            ? {
+                ...t,
+                status: next,
+                completed_at: nowIso,
+                completed_by: uid,
+                completed_profile: meProfile,
+              }
+            : {
+                ...t,
+                status: next,
+                completed_at: null,
+                completed_by: null,
+                completed_profile: null,
+              },
+      ),
     );
 
     // Pop effect when completing
@@ -320,11 +432,38 @@ export function BoardPage() {
     }
 
     try {
-      const { error: e } = await supabase
-        .from("tasks")
-        .update({ status: next })
-        .eq("id", taskId);
-      if (e) throw new Error(e.message);
+      // Try to write completion metadata (requires migration 0006). If columns don't exist yet,
+      // gracefully fall back to updating only the status so the app remains usable.
+      const payload: Record<string, unknown> = { status: next };
+      if (next === "done") {
+        payload.completed_at = nowIso;
+        payload.completed_by = uid;
+      } else {
+        payload.completed_at = null;
+        payload.completed_by = null;
+      }
+
+      const { error: e1 } = await supabase.from("tasks").update(payload).eq("id", taskId);
+      if (e1) {
+        const msg = e1.message ?? "";
+        const looksLikeMissingCols =
+          msg.includes("completed_at") ||
+          msg.includes("completed_by") ||
+          msg.includes("column") ||
+          msg.includes("does not exist");
+        if (looksLikeMissingCols) {
+          const { error: e2 } = await supabase
+            .from("tasks")
+            .update({ status: next })
+            .eq("id", taskId);
+          if (e2) throw new Error(e2.message);
+          setError(
+            "Completion tracking columns aren’t in your database yet. Apply migration `0006_add_task_completion_fields.sql` to see who completed tasks and when.",
+          );
+        } else {
+          throw new Error(e1.message);
+        }
+      }
       // realtime + load keeps state consistent
     } catch (e) {
       // revert if update failed
@@ -338,7 +477,14 @@ export function BoardPage() {
   const filteredSorted = useMemo(() => {
     const q = query.trim().toLowerCase();
     const list = q
-      ? tasks.filter((t) => t.title.toLowerCase().includes(q))
+      ? tasks.filter((t) => {
+          const titleMatch = t.title.toLowerCase().includes(q);
+          const companyMatch = t.company?.toLowerCase().includes(q);
+          const responsibleMatch =
+            t.responsible_profile?.display_name?.toLowerCase().includes(q) ||
+            t.responsible_profile?.email?.toLowerCase().includes(q);
+          return titleMatch || companyMatch || responsibleMatch;
+        })
       : tasks;
 
     return [...list].sort((a, b) => {
@@ -346,7 +492,10 @@ export function BoardPage() {
         const cmp = a.title.toLowerCase().localeCompare(b.title.toLowerCase());
         return sortDir === "asc" ? cmp : -cmp;
       }
-      const dueCmp = a.due_date.localeCompare(b.due_date);
+      // Due sorting: ASAP first, then due date
+      const aDue = a.is_asap ? "0000-00-00" : (a.due_date ?? "9999-12-31");
+      const bDue = b.is_asap ? "0000-00-00" : (b.due_date ?? "9999-12-31");
+      const dueCmp = aDue.localeCompare(bDue);
       if (dueCmp !== 0) return sortDir === "asc" ? dueCmp : -dueCmp;
       const cmp = b.created_at.localeCompare(a.created_at);
       return sortDir === "asc" ? cmp : -cmp;
@@ -362,6 +511,23 @@ export function BoardPage() {
     [filteredSorted],
   );
 
+  // Summary logic
+  const oldestTask = useMemo(() => {
+    if (tasks.length === 0) return null;
+    return [...tasks].sort((a, b) => a.created_at.localeCompare(b.created_at))[0];
+  }, [tasks]);
+
+  const completedTodayCount = useMemo(() => {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    return tasks.filter(
+      (t) =>
+        t.status === "done" &&
+        new Date((t.completed_at ?? t.updated_at ?? t.created_at) as string).getTime() >=
+          startOfToday.getTime(),
+    ).length;
+  }, [tasks]);
+
   // Bubbles: hide done tasks (except while popping).
   const bubbleTasks = useMemo(
     () => tasks.filter((t) => t.status !== "done" || popping.has(t.id)),
@@ -373,8 +539,8 @@ export function BoardPage() {
     const now = Date.now();
     return [...bubbleTasks].sort((a, b) => {
       // bias urgent closer to center via anchor ordering
-      const aDue = new Date(a.due_date).getTime();
-      const bDue = new Date(b.due_date).getTime();
+      const aDue = a.is_asap || !a.due_date ? 0 : new Date(a.due_date).getTime();
+      const bDue = b.is_asap || !b.due_date ? 0 : new Date(b.due_date).getTime();
       const aDays = Math.ceil((aDue - now) / (1000 * 60 * 60 * 24));
       const bDays = Math.ceil((bDue - now) / (1000 * 60 * 60 * 24));
       if (aDays !== bDays) return aDays - bDays;
@@ -388,18 +554,51 @@ export function BoardPage() {
     return m;
   }, [layoutOrder]);
 
+  function urgencyLevel(t: RowTask) {
+    // ASAP tasks are always max urgency.
+    if (t.is_asap || !t.due_date) return 1;
+
+    const created = new Date(t.created_at).getTime();
+    const due = new Date(t.due_date + "T00:00:00").getTime();
+    const now = Date.now();
+
+    if (!Number.isFinite(created) || !Number.isFinite(due)) return 0;
+    if (due <= now) return 1;
+
+    // Step size = (due - created) / 20 (e.g., if that equals ~3h, intensity increases every ~3h).
+    const total = Math.max(1, due - created);
+    const elapsed = clamp(now - created, 0, total);
+    const raw = elapsed / total; // 0..1
+    const steps = 20;
+    const stepped = Math.round(raw * steps) / steps;
+    return clamp(stepped, 0, 1);
+  }
+
+  function urgencyColor(u: number) {
+    // Interpolate from orange -> red as urgency increases.
+    const t = clamp(u, 0, 1);
+    const r = Math.round(255);
+    const g = Math.round(150 - t * 120); // 150 -> 30
+    const b = Math.round(60 - t * 50); // 60 -> 10
+    return `rgba(${r}, ${g}, ${b}, ${0.55 + t * 0.25})`;
+  }
+
   function bubbleVisual(t: RowTask) {
     const now = Date.now();
-    const daysUntilDue = Math.ceil(
-      (new Date(t.due_date).getTime() - now) / (1000 * 60 * 60 * 24),
-    );
+    const dueMs =
+      t.is_asap || !t.due_date ? now : new Date(t.due_date + "T00:00:00").getTime();
+    const daysUntilDue = Math.ceil((dueMs - now) / (1000 * 60 * 60 * 24));
     const size = clamp(154 - daysUntilDue * 10, 92, 168);
-    const hue = clamp(185 - daysUntilDue * 8, 10, 200);
-    return { size, r: size / 2, hue };
+    const u = urgencyLevel(t);
+    const color = t.responsible_id
+      ? userColors.get(t.responsible_id)
+      : urgencyColor(u);
+    return { size, r: size / 2, color, u };
   }
 
   // Physics loop: bounce off walls + bounce off each other + gently pull toward a grid anchor.
   useEffect(() => {
+    if (viewMode !== "board") return;
     const el = canvasRef.current;
     if (!el) return;
 
@@ -430,14 +629,19 @@ export function BoardPage() {
       const jy = (((hh / 1000) % 1000) / 1000 - 0.5) * cellH * 0.35;
       const x = marginX + cellW * (col + 0.5) + jx;
       const y = marginY + cellH * (row + 0.5) + jy;
-      const vx = ((hh % 2 === 0 ? 1 : -1) * (40 + (hh % 60))) as number;
+      const vx = ((hh % 2 === 0 ? 1 : -1) * (60 + (hh % 80))) as number;
       const vy = (((hh / 3) % 2 === 0 ? 1 : -1) *
-        (40 + ((hh / 7) % 60))) as number;
+        (60 + ((hh / 7) % 80))) as number;
       sim.current.set(id, { x, y, vx, vy });
     }
 
     function step(t: number) {
-      if (!canvasRef.current) return;
+      // When switching views or during load() we briefly unmount the canvas.
+      // Keep the RAF alive so bubbles resume instantly when the canvas reappears.
+      if (!canvasRef.current) {
+        rafId.current = window.requestAnimationFrame(step);
+        return;
+      }
       const rect = canvasRef.current.getBoundingClientRect();
       const w = rect.width;
       const h = rect.height;
@@ -496,16 +700,17 @@ export function BoardPage() {
           node.vy += (anchor.ay - node.y) * k * dt;
         }
 
-        // tiny swirl to keep motion alive
+        // gentle perpetual drift (time-based) so motion never damps to a full stop
         const hh = hash(workspaceId + id + "swirl");
-        const sx = ((hh % 1000) / 1000 - 0.5) * 26;
-        const sy = (((hh / 1000) % 1000) / 1000 - 0.5) * 26;
-        node.vx += sx * dt;
-        node.vy += sy * dt;
+        const phase = (hh % 1000) / 1000 * Math.PI * 2;
+        const amp = 18 + ((hh / 9) % 12); // px/s^2-ish
+        const tt = t / 1000;
+        node.vx += Math.sin(tt + phase) * amp * dt;
+        node.vy += Math.cos(tt * 0.9 + phase) * amp * dt;
 
-        // damping
-        node.vx *= 0.992;
-        node.vy *= 0.992;
+        // damping (light) - keep it floaty, not stuck
+        node.vx *= 0.9985;
+        node.vy *= 0.9985;
 
         node.x += node.vx * dt;
         node.y += node.vy * dt;
@@ -581,7 +786,8 @@ export function BoardPage() {
         const btn = bubbleEls.current.get(id);
         const r = rById.get(id) ?? 50;
         if (!node || !btn) continue;
-        btn.style.transform = `translate3d(${node.x - r}px, ${node.y - r}px, 0)`;
+        btn.style.setProperty("--x", `${node.x - r}px`);
+        btn.style.setProperty("--y", `${node.y - r}px`);
       }
 
       rafId.current = window.requestAnimationFrame(step);
@@ -594,7 +800,83 @@ export function BoardPage() {
       rafId.current = null;
       lastT.current = 0;
     };
-  }, [layoutOrder, layoutIndex, workspaceId]);
+  }, [layoutOrder, layoutIndex, workspaceId, viewMode]);
+
+  const onToggleSort = (key: "due" | "title") => {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const calendarDays = useMemo(() => {
+    const year = currentMonth.getFullYear();
+    const month = currentMonth.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const daysInMonth = lastDay.getDate();
+    const startingDay = firstDay.getDay(); // 0 = Sunday
+
+    const prevMonthLastDay = new Date(year, month, 0).getDate();
+    const days: Array<{ date: string; day: number; current: boolean; isToday: boolean }> = [];
+
+    // Padding from prev month
+    for (let i = startingDay - 1; i >= 0; i--) {
+      const d = new Date(year, month - 1, prevMonthLastDay - i);
+      days.push({
+        date: d.toISOString().split("T")[0],
+        day: d.getDate(),
+        current: false,
+        isToday: false,
+      });
+    }
+
+    // Current month
+    const todayStr = new Date().toISOString().split("T")[0];
+    for (let i = 1; i <= daysInMonth; i++) {
+      const dStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(i).padStart(2, "0")}`;
+      days.push({
+        date: dStr,
+        day: i,
+        current: true,
+        isToday: dStr === todayStr,
+      });
+    }
+
+    // Padding from next month
+    const totalSlots = 42; // 6 rows of 7 days
+    const nextMonthPadding = totalSlots - days.length;
+    for (let i = 1; i <= nextMonthPadding; i++) {
+      const d = new Date(year, month + 1, i);
+      days.push({
+        date: d.toISOString().split("T")[0],
+        day: d.getDate(),
+        current: false,
+        isToday: false,
+      });
+    }
+
+    return days;
+  }, [currentMonth]);
+
+  const tasksByDate = useMemo(() => {
+    const map = new Map<string, RowTask[]>();
+    tasks.forEach((t) => {
+      const d = t.due_date;
+      if (!d || t.is_asap) return;
+      if (!map.has(d)) map.set(d, []);
+      map.get(d)!.push(t);
+    });
+    return map;
+  }, [tasks]);
+
+  const asapTasks = useMemo(() => {
+    // Calendar lane: show only active ASAP tasks
+    return tasks
+      .filter((t) => Boolean(t.is_asap) && t.status !== "done")
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }, [tasks]);
 
   if (loading) {
     return (
@@ -606,21 +888,30 @@ export function BoardPage() {
     );
   }
 
-  const onToggleSort = (key: "due" | "title") => {
-    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else {
-      setSortKey(key);
-      setSortDir("asc");
-    }
-  };
-
   return (
     <div className="boardScreen">
+      <div className="workspaceTitleStandalone">{workspace?.name ?? "Board"}</div>
+
       <div className="boardHeader slim">
         <div className="boardHeaderLeft">
-          <div className="kicker">Workspace</div>
-          <div className="boardHeaderTitle">{workspace?.name ?? "Board"}</div>
-          <div className="muted">{members.length} member(s)</div>
+          <div className="kicker">Summary</div>
+          <div className="summaryDetails">
+            <div className="summaryItem">
+              <b>{members.length}</b> members
+            </div>
+            <div className="summaryDivider" />
+            <div className="summaryItem">
+              <b>{completedTodayCount}</b> completed today
+            </div>
+            {oldestTask && (
+              <>
+                <div className="summaryDivider" />
+                <div className="summaryItem">
+                  Oldest: <b>{oldestTask.title}</b> ({formatAgeHours(oldestTask.age_hours)})
+                </div>
+              </>
+            )}
+          </div>
         </div>
         <div className="boardHeaderRight">
           <div className="memberRow" title="Workspace members">
@@ -628,21 +919,39 @@ export function BoardPage() {
               <div
                 key={member.user_id}
                 className="memberAvatar"
-                title={profile?.email ?? member.user_id}
+                title={profile?.display_name || profile?.email || member.user_id}
+                style={{ ["--user-color" as any]: userColors.get(member.user_id) } as any}
               >
-                {initials(
-                  profile?.display_name ?? profile?.email ?? member.user_id,
-                )}
+                {initials(profile?.display_name ?? profile?.email ?? member.user_id)}
               </div>
             ))}
             {members.length > 6 ? (
               <div className="memberMore">+{members.length - 6}</div>
             ) : null}
           </div>
+
+          <div className="viewToggle" style={{ marginLeft: 12 }}>
+            <button
+              className={`viewBtn ${viewMode === "board" ? "active" : ""}`}
+              onClick={() => setViewMode("board")}
+              type="button"
+            >
+              Board
+            </button>
+            <button
+              className={`viewBtn ${viewMode === "calendar" ? "active" : ""}`}
+              onClick={() => setViewMode("calendar")}
+              type="button"
+            >
+              Calendar
+            </button>
+          </div>
+
           <button
             className="secondaryBtn compact"
             onClick={() => void load()}
             type="button"
+            style={{ marginLeft: 8 }}
           >
             Refresh
           </button>
@@ -699,11 +1008,11 @@ export function BoardPage() {
                   <div className="taskRowTitle">{t.title}</div>
                   <div className="taskRowMeta">
                     <span className="chip">{formatAgeHours(t.age_hours)}</span>
-                    <span className="chip">{formatDue(t.due_date)}</span>
-                    {t.creator_profile ? (
-                      <span className="chip">
-                        {t.creator_profile.display_name ??
-                          t.creator_profile.email}
+                    <span className="chip">{formatDue(t.due_date, t.is_asap)}</span>
+                    {t.company ? <span className="chip company">{t.company}</span> : null}
+                    {t.responsible_profile ? (
+                      <span className="chip responsible" title="Responsible">
+                        👤 {t.responsible_profile.display_name ?? t.responsible_profile.email}
                       </span>
                     ) : null}
                   </div>
@@ -733,7 +1042,21 @@ export function BoardPage() {
                   <div className="taskRowTitle">{t.title}</div>
                   <div className="taskRowMeta">
                     <span className="chip">{formatAgeHours(t.age_hours)}</span>
-                    <span className="chip">{formatDue(t.due_date)}</span>
+                    <span className="chip">{formatDue(t.due_date, t.is_asap)}</span>
+                    {t.company ? <span className="chip company">{t.company}</span> : null}
+                    {t.responsible_profile ? (
+                      <span className="chip responsible" title="Responsible">
+                        👤 {t.responsible_profile.display_name ?? t.responsible_profile.email}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="taskRowCompletion">
+                    {t.completed_profile || t.completed_at ? (
+                      <div className="completionStamp">
+                        ✓ Completed {t.completed_at ? formatDateTime(t.completed_at) : ""}
+                        {t.completed_profile ? ` by ${t.completed_profile.display_name ?? t.completed_profile.email}` : ""}
+                      </div>
+                    ) : null}
                   </div>
                 </button>
               ))}
@@ -746,28 +1069,41 @@ export function BoardPage() {
           </div>
         </div>
 
-        <div className="bubbleCanvas" ref={canvasRef}>
-          <div className="gridOverlay" aria-hidden="true" />
+        {viewMode === "board" ? (
+          <div className="bubbleCanvas" ref={canvasRef}>
+            <div className="gridOverlay" aria-hidden="true" />
 
           {layoutOrder.map((t) => {
-            const { size, hue } = bubbleVisual(t);
+            const { size, color, u } = bubbleVisual(t);
             const isPop = popping.has(t.id);
+            const urgent = u >= 0.15;
             return (
               <button
                 key={t.id}
                 ref={(node) => {
                   if (!node) bubbleEls.current.delete(t.id);
-                  else bubbleEls.current.set(t.id, node);
+                  else {
+                    bubbleEls.current.set(t.id, node);
+                    // Avoid the "pile in the corner" when switching Calendar -> Board by painting
+                    // the last known physics position immediately (before next RAF tick).
+                    const simNode = sim.current.get(t.id);
+                    if (simNode) {
+                      const r = size / 2;
+                      node.style.setProperty("--x", `${simNode.x - r}px`);
+                      node.style.setProperty("--y", `${simNode.y - r}px`);
+                    }
+                  }
                 }}
-                className={`taskBubble ${t.id === selectedId ? "selected" : ""} ${isPop ? "popping" : ""}`}
+                className={`taskBubble ${urgent ? "urgent" : ""} ${t.id === selectedId ? "selected" : ""} ${isPop ? "popping" : ""}`}
                 onClick={() => setSelectedId(t.id)}
                 style={
                   {
                     width: `${size}px`,
                     height: `${size}px`,
-                    left: 0,
-                    top: 0,
-                    ["--hue" as never]: hue,
+                    ["--user-color" as never]: color,
+                    ["--urgency" as never]: u,
+                    ["--throbDur" as never]: `${Math.max(1.4, 6 - u * 4)}s`,
+                    ["--shakeDur" as never]: `${Math.max(0.6, 1.6 - u * 1.1)}s`,
                   } as never
                 }
                 type="button"
@@ -775,20 +1111,128 @@ export function BoardPage() {
                 <div className="bubbleInner">
                   <div className="bubbleLabel">{t.title}</div>
                   <div className="bubbleMeta">
-                    {formatAgeHours(t.age_hours)} · {formatDue(t.due_date)}
+                    {t.company ? `${t.company} · ` : ""}
+                    {formatAgeHours(t.age_hours)} · {formatDue(t.due_date, t.is_asap)}
                   </div>
                 </div>
-              </button>
-            );
-          })}
+                </button>
+              );
+            })}
 
-          {layoutOrder.length === 0 ? (
-            <div className="emptyCenter">
-              <div className="emptyTitle">No tasks yet</div>
-              <div className="muted">Create a task and watch it float.</div>
+            {layoutOrder.length === 0 ? (
+              <div className="emptyCenter">
+                <div className="emptyTitle">No tasks yet</div>
+                <div className="muted">Create a task and watch it float.</div>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className="calendarCanvas">
+            <div className="calendarTop">
+              <div className="calendarMonthName">
+                {currentMonth.toLocaleString(undefined, {
+                  month: "long",
+                  year: "numeric",
+                })}
+              </div>
+              <div className="segmented">
+                <button
+                  className="segBtn"
+                  onClick={() =>
+                    setCurrentMonth(
+                      new Date(
+                        currentMonth.getFullYear(),
+                        currentMonth.getMonth() - 1,
+                        1,
+                      ),
+                    )
+                  }
+                >
+                  ←
+                </button>
+                <button className="segBtn" onClick={() => setCurrentMonth(new Date())}>
+                  Today
+                </button>
+                <button
+                  className="segBtn"
+                  onClick={() =>
+                    setCurrentMonth(
+                      new Date(
+                        currentMonth.getFullYear(),
+                        currentMonth.getMonth() + 1,
+                        1,
+                      ),
+                    )
+                  }
+                >
+                  →
+                </button>
+              </div>
             </div>
-          ) : null}
-        </div>
+
+            {asapTasks.length ? (
+              <div className="asapLane" aria-label="ASAP tasks">
+                <div className="asapLaneHeader">
+                  <div className="asapLaneTitle">ASAP</div>
+                  <div className="muted">{asapTasks.length}</div>
+                </div>
+                <div className="asapLaneScroll">
+                  {asapTasks.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className={`asapPill ${t.id === selectedId ? "active" : ""}`}
+                      onClick={() => setSelectedId(t.id)}
+                      style={
+                        {
+                          ["--user-color" as never]: t.responsible_id
+                            ? userColors.get(t.responsible_id)
+                            : "rgba(255,255,255,0.2)",
+                        } as never
+                      }
+                      title={
+                        t.responsible_profile
+                          ? `${t.title} (Responsible: ${t.responsible_profile.display_name ?? t.responsible_profile.email})`
+                          : t.title
+                      }
+                    >
+                      <span className="asapDot" aria-hidden="true" />
+                      <span className="asapText">{t.title}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="calendarGrid">
+              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+                <div key={d} className="calendarDayHead">
+                  {d}
+                </div>
+              ))}
+              {calendarDays.map((day) => (
+                <div
+                  key={day.date}
+                  className={`calendarCell ${day.current ? "" : "otherMonth"} ${day.isToday ? "today" : ""}`}
+                >
+                  <div className="calendarDayNum">{day.day}</div>
+                  <div className="calendarTaskList">
+                    {(tasksByDate.get(day.date) || []).map((t) => (
+                      <div
+                        key={t.id}
+                        className={`calendarTask ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
+                        onClick={() => setSelectedId(t.id)}
+                        title={t.title}
+                      >
+                        {t.title}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="sidePanel">
           <div className="sideCard">
@@ -822,7 +1266,21 @@ export function BoardPage() {
                       value={editDueDate}
                       onChange={(e) => setEditDueDate(e.target.value)}
                       type="date"
+                      disabled={editAsap}
                     />
+                  </label>
+                  <label className="field" style={{ marginTop: -6 }}>
+                    <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={editAsap}
+                        onChange={(e) => setEditAsap(e.target.checked)}
+                        style={{ width: 18, height: 18 }}
+                      />
+                      <div className="fieldLabel" style={{ margin: 0 }}>
+                        ASAP (no due date)
+                      </div>
+                    </div>
                   </label>
                   <label className="field">
                     <div className="fieldLabel">Description</div>
@@ -832,11 +1290,39 @@ export function BoardPage() {
                       rows={4}
                     />
                   </label>
+                  <label className="field">
+                    <div className="fieldLabel">Person Responsible</div>
+                    <select
+                      value={editResponsibleId}
+                      onChange={(e) => setEditResponsibleId(e.target.value)}
+                    >
+                      <option value="">Any</option>
+                      {members.map(({ profile, member }) => (
+                        <option key={member.user_id} value={member.user_id}>
+                          {profile?.display_name ?? profile?.email ?? member.user_id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <div className="fieldLabel">Company</div>
+                    <select
+                      value={editCompany}
+                      onChange={(e) => setEditCompany(e.target.value)}
+                    >
+                      <option value="">N/A</option>
+                      {["BTB", "OTE", "TKO", "Panels", "Ursus"].map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <div className="row" style={{ marginTop: 14 }}>
                     <button
                       className="primaryBtn"
                       onClick={updateTask}
-                      disabled={busy || !editTitle.trim() || !editDueDate}
+                      disabled={busy || !editTitle.trim() || (!editAsap && !editDueDate)}
                       type="button"
                     >
                       Save
@@ -863,8 +1349,79 @@ export function BoardPage() {
                 </div>
               ) : (
                 <div>
+                  <div className="statusBadgeRow">
+                    <div className={`statusPill ${selected.status}`}>
+                      {selected.status === "done" ? "✓ Complete" : "○ In Progress"}
+                    </div>
+                    {urgencyLevel(selected) >= 0.7 && selected.status !== "done" ? (
+                      <div className="urgentPill">🔥 Urgent</div>
+                    ) : null}
+                  </div>
                   <div className="titleLg">{selected.title}</div>
-                  <div className="muted">Due {selected.due_date}</div>
+                  <div className="muted" style={{ marginBottom: 12 }}>
+                    Due {selected.due_date} 
+                    {selected.company ? ` · for ${selected.company}` : ""}
+                  </div>
+
+                  <div className="tagRow">
+                    {selected.is_asap ? <span className="tagChip">ASAP</span> : null}
+                    {selected.company ? (
+                      <span className="tagChip company">{selected.company}</span>
+                    ) : (
+                      <span className="tagChip">Company: N/A</span>
+                    )}
+                    {selected.responsible_profile ? (
+                      <span className="tagChip">
+                        👤 {selected.responsible_profile.display_name ?? selected.responsible_profile.email}
+                      </span>
+                    ) : (
+                      <span className="tagChip">Responsible: Any</span>
+                    )}
+                  </div>
+
+                  <div className="taskMetricsRow">
+                    <div className="metricBox">
+                      <div className="metricLabel">Time Alive</div>
+                      <div className="metricValue">{formatAgeHours(selected.age_hours)}</div>
+                    </div>
+                    {selected.responsible_profile && (
+                      <div className="metricBox">
+                        <div className="metricLabel">Person Responsible</div>
+                        <div className="metricValue" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <div className="avatarCircle sm">
+                            {initials(selected.responsible_profile.display_name ?? selected.responsible_profile.email ?? "")}
+                          </div>
+                          {selected.responsible_profile.display_name ?? selected.responsible_profile.email}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {selected.status === "done" && (
+                    <div className="completionHero">
+                      <div className="heroLabel">Completion Details</div>
+                      <div className="heroGrid">
+                        <div className="heroItem">
+                          <div className="heroKey">Finished on</div>
+                          <div className="heroVal">
+                            {selected.completed_at
+                              ? formatDateTime(selected.completed_at)
+                              : "—"}
+                          </div>
+                        </div>
+                        <div className="heroItem">
+                          <div className="heroKey">Completed by</div>
+                          <div className="heroVal">
+                            {selected.completed_profile
+                              ? selected.completed_profile.display_name ??
+                                selected.completed_profile.email
+                              : "Unknown"}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="sideBody">{selected.description}</div>
 
                   <div className="row" style={{ marginTop: 14 }}>
@@ -910,7 +1467,21 @@ export function BoardPage() {
                 value={dueDate}
                 onChange={(e) => setDueDate(e.target.value)}
                 type="date"
+                disabled={asap}
               />
+            </label>
+            <label className="field" style={{ marginTop: -6 }}>
+              <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={asap}
+                  onChange={(e) => setAsap(e.target.checked)}
+                  style={{ width: 18, height: 18 }}
+                />
+                <div className="fieldLabel" style={{ margin: 0 }}>
+                  ASAP (no due date)
+                </div>
+              </div>
             </label>
             <label className="field">
               <div className="fieldLabel">Description</div>
@@ -920,12 +1491,40 @@ export function BoardPage() {
                 rows={4}
               />
             </label>
+            <label className="field">
+              <div className="fieldLabel">Person Responsible</div>
+              <select
+                value={responsibleId}
+                onChange={(e) => setResponsibleId(e.target.value)}
+              >
+                <option value="">Any</option>
+                {members.map(({ profile, member }) => (
+                  <option key={member.user_id} value={member.user_id}>
+                    {profile?.display_name ?? profile?.email ?? member.user_id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <div className="fieldLabel">Company</div>
+              <select
+                value={company}
+                onChange={(e) => setCompany(e.target.value)}
+              >
+                <option value="">N/A</option>
+                {["BTB", "OTE", "TKO", "Panels", "Ursus"].map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               className="primaryBtn"
               onClick={createTask}
               type="button"
               disabled={
-                creating || !title.trim() || !dueDate || !description.trim()
+                creating || !title.trim() || (!asap && !dueDate) || !description.trim()
               }
             >
               {creating ? "Creating…" : "Add bubble"}
