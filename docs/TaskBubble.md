@@ -15,6 +15,13 @@ The core differentiator is the **interactive bubble UI** (not a list/table) whil
 - A user can **create an account**.
 - A user can **sign in**.
 
+### Workspaces
+TaskBubble is organized around **workspaces** (teams/boards).
+- A user can **create a workspace**.
+- A user can **join a workspace** (MVP: via a shareable join code).
+- A user can switch between workspaces they belong to.
+- On signup (or first login), every user is automatically enrolled in a default workspace named **Home**.
+
 ### Core screen (Bubble Board)
 After sign-in, the user lands on a screen showing **floating bubbles**.
 - **Each bubble = one task**
@@ -40,6 +47,7 @@ Required fields (user-provided):
 
 System fields:
 - **id**: UUID
+- **workspace_id**: UUID (references workspace)
 - **created_at**: timestamp
 - **created_by**: UUID (references user)
 - **updated_at**: timestamp (optional but recommended)
@@ -54,9 +62,11 @@ Recommended MVP fields (to avoid repainting later):
 - **deleted_at**: timestamp nullable (soft delete)
 
 ## Permissions (initial assumptions)
-- All authenticated team members can **read** all tasks (shared board).
-- Any authenticated team member can **create** tasks.
-- A user can **edit/delete** tasks they created (MVP), with an option to expand later (admins, assignees, etc.).
+- A user can only see workspaces they are a member of.
+- Within a workspace:
+  - Members can **read** tasks in that workspace.
+  - Members can **create** tasks in that workspace.
+  - A user can **edit/delete** tasks they created (MVP), with an option to expand later (admins, assignees, etc.).
 
 ## Bubble behavior (MVP suggestions)
 - **Size**: based on proximity to due date (closer due → bigger) or status (open bigger, done smaller).
@@ -70,8 +80,8 @@ Recommended MVP fields (to avoid repainting later):
 
 ## Open questions to confirm
 - Is “team of 10” hard-coded (invite-only), or open sign-ups but intended for small teams?
-- Are tasks shared across all users globally, or scoped to a workspace/team?
 - Should due date include time-of-day and timezone?
 - Should tasks be assignable, or just “created by” for MVP?
+- Should “Home” be a single shared workspace everyone joins, or a personal workspace per user?
 
 
