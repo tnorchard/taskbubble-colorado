@@ -18,4 +18,22 @@ export type Task = {
   workspace_id: string;
 };
 
+export type TaskWithAge = Task & {
+  age_hours: number;
+};
+
+export type Profile = {
+  id: string;
+  email: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
+};
+
+export type WorkspaceMember = {
+  workspace_id: string;
+  user_id: string;
+  role: "owner" | "admin" | "member";
+  created_at: string;
+};
+
 

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
 import { getSupabase } from "../lib/supabaseClient";
-import type { Task, Workspace } from "../types";
+import type { Profile, TaskWithAge, Workspace, WorkspaceMember } from "../types";
 
 function hash(str: string) {
   let h = 0;
@@ -19,11 +19,14 @@ export function BoardPage() {
   const workspaceId = id ?? "";
 
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<TaskWithAge[]>([]);
+  const [members, setMembers] = useState<Array<{ member: WorkspaceMember; profile: Profile | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [sortMode, setSortMode] = useState<"due" | "title">("due");
 
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
@@ -31,6 +34,19 @@ export function BoardPage() {
   const [creating, setCreating] = useState(false);
 
   const selected = useMemo(() => tasks.find((t) => t.id === selectedId) ?? null, [tasks, selectedId]);
+  const createRef = useRef<HTMLDivElement | null>(null);
+
+  function formatDue(d: string) {
+    const dt = new Date(d + "T00:00:00");
+    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(dt);
+  }
+  function formatAgeHours(age: number) {
+    const h = Math.max(0, Math.floor(age));
+    if (h < 24) return `${h}h`;
+    const days = Math.floor(h / 24);
+    const rem = h % 24;
+    return rem ? `${days}d ${rem}h` : `${days}d`;
+  }
 
   async function load() {
     setLoading(true);
@@ -42,18 +58,44 @@ export function BoardPage() {
       .eq("id", workspaceId)
       .maybeSingle();
     const tReq = supabase
-      .from("tasks")
-      .select("id,title,description,due_date,status,created_at,created_by,workspace_id")
+      .from("tasks_with_age")
+      .select("id,title,description,due_date,status,created_at,created_by,workspace_id,age_hours")
       .eq("workspace_id", workspaceId)
+      .order("due_date", { ascending: true })
       .order("created_at", { ascending: false });
+    const mReq = supabase
+      .from("workspace_members")
+      .select("workspace_id,user_id,role,created_at")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: true });
 
-    const [{ data: ws, error: wsErr }, { data: t, error: tErr }] = await Promise.all([wsReq, tReq]);
+    const [{ data: ws, error: wsErr }, { data: t, error: tErr }, { data: m, error: mErr }] = await Promise.all([
+      wsReq,
+      tReq,
+      mReq,
+    ]);
 
     if (wsErr) setError(wsErr.message);
     if (tErr) setError(tErr.message);
+    if (mErr) setError(mErr.message);
 
     setWorkspace((ws as Workspace) ?? null);
-    setTasks((t ?? []) as Task[]);
+    setTasks((t ?? []) as TaskWithAge[]);
+
+    const membersRaw = (m ?? []) as WorkspaceMember[];
+    const userIds = Array.from(new Set(membersRaw.map((x) => x.user_id)));
+    if (userIds.length) {
+      const { data: profilesData } = await supabase
+        .from("profiles")
+        .select("id,email,display_name,avatar_url")
+        .in("id", userIds);
+      const profiles = (profilesData ?? []) as Profile[];
+      const byId = new Map(profiles.map((p) => [p.id, p]));
+      setMembers(membersRaw.map((mem) => ({ member: mem, profile: byId.get(mem.user_id) ?? null })));
+    } else {
+      setMembers([]);
+    }
+
     setLoading(false);
   }
 
@@ -61,6 +103,14 @@ export function BoardPage() {
     if (!workspaceId) return;
     void load();
   }, [workspaceId]);
+
+  useEffect(() => {
+    function handler() {
+      createRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    window.addEventListener("tb:newTask", handler);
+    return () => window.removeEventListener("tb:newTask", handler);
+  }, []);
 
   async function createTask() {
     setCreating(true);
@@ -107,6 +157,18 @@ export function BoardPage() {
     });
   }, [tasks, workspaceId]);
 
+  const filteredSorted = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const list = q ? tasks.filter((t) => t.title.toLowerCase().includes(q)) : tasks;
+    const sorted = [...list].sort((a, b) => {
+      if (sortMode === "title") return a.title.localeCompare(b.title);
+      const dueCmp = a.due_date.localeCompare(b.due_date);
+      if (dueCmp !== 0) return dueCmp;
+      return b.created_at.localeCompare(a.created_at);
+    });
+    return sorted;
+  }, [tasks, query, sortMode]);
+
   if (loading) {
     return (
       <div className="screen">
@@ -119,21 +181,22 @@ export function BoardPage() {
 
   return (
     <div className="boardScreen">
-      <div className="boardTop">
-        <div className="boardTopLeft">
-          <Link to="/workspaces" className="chipLink">
-            ← Workspaces
-          </Link>
-          <div className="boardTitle">
-            <div className="kicker">Workspace</div>
-            <div className="h1" style={{ margin: 0 }}>
-              {workspace?.name ?? "Board"}
-            </div>
-          </div>
+      <div className="boardHeader">
+        <div className="boardHeaderLeft">
+          <div className="kicker">Workspace</div>
+          <div className="boardHeaderTitle">{workspace?.name ?? "Board"}</div>
+          <div className="muted">Join code: {workspace?.join_code ?? "—"}</div>
         </div>
-
-        <div className="boardTopRight">
-          <button className="secondaryBtn" onClick={() => void load()} type="button">
+        <div className="boardHeaderRight">
+          <div className="memberRow" title="Workspace members">
+            {members.slice(0, 6).map(({ profile, member }) => (
+              <div key={member.user_id} className="memberAvatar" title={profile?.email ?? member.user_id}>
+                {initials(profile?.display_name ?? profile?.email ?? member.user_id)}
+              </div>
+            ))}
+            {members.length > 6 ? <div className="memberMore">+{members.length - 6}</div> : null}
+          </div>
+          <button className="secondaryBtn compact" onClick={() => void load()} type="button">
             Refresh
           </button>
         </div>
@@ -141,7 +204,56 @@ export function BoardPage() {
 
       {error ? <div className="toastError">{error}</div> : null}
 
-      <div className="boardGrid">
+      <div className="boardGrid3">
+        <div className="taskListPanel">
+          <div className="panelTitleRow">
+            <div className="panelTitle" style={{ margin: 0 }}>
+              Tasks
+            </div>
+            <div className="segmented">
+              <button
+                type="button"
+                className={`segBtn ${sortMode === "due" ? "active" : ""}`}
+                onClick={() => setSortMode("due")}
+              >
+                Due
+              </button>
+              <button
+                type="button"
+                className={`segBtn ${sortMode === "title" ? "active" : ""}`}
+                onClick={() => setSortMode("title")}
+              >
+                Title
+              </button>
+            </div>
+          </div>
+
+          <input
+            className="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by title…"
+          />
+
+          <div className="taskList">
+            {filteredSorted.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={`taskRow ${t.id === selectedId ? "active" : ""}`}
+                onClick={() => setSelectedId(t.id)}
+              >
+                <div className="taskRowTitle">{t.title}</div>
+                <div className="taskRowMeta">
+                  <span className="chip">{formatAgeHours(t.age_hours)}</span>
+                  <span className="chip">{formatDue(t.due_date)}</span>
+                </div>
+              </button>
+            ))}
+            {filteredSorted.length === 0 ? <div className="muted">No matching tasks.</div> : null}
+          </div>
+        </div>
+
         <div className="bubbleCanvas">
           <div className="gridOverlay" aria-hidden="true" />
           {bubbles.map(({ t, x, y, size, hue, drift, dur, delay }) => (
@@ -164,7 +276,9 @@ export function BoardPage() {
               type="button"
             >
               <div className="bubbleLabel">{t.title}</div>
-              <div className="bubbleMeta">{t.due_date}</div>
+              <div className="bubbleMeta">
+                {formatAgeHours(t.age_hours)} · {formatDue(t.due_date)}
+              </div>
             </button>
           ))}
 
@@ -192,6 +306,7 @@ export function BoardPage() {
 
           <div className="sideCard">
             <div className="panelTitle">Create a task</div>
+            <div ref={createRef} />
             <label className="field">
               <div className="fieldLabel">Title</div>
               <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ship the new landing page" />
@@ -217,6 +332,14 @@ export function BoardPage() {
       </div>
     </div>
   );
+}
+
+function initials(name: string) {
+  const n = name.includes("@") ? name.split("@")[0] : name;
+  const parts = n.replace(/[^a-zA-Z0-9 ]/g, " ").split(" ").filter(Boolean);
+  const a = parts[0]?.[0] ?? "U";
+  const b = parts[1]?.[0] ?? parts[0]?.[1] ?? "";
+  return (a + b).toUpperCase();
 }
 
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { getSupabase, isSupabaseConfigured } from "./lib/supabaseClient";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { AuthPage } from "./pages/AuthPage";
 import { WorkspacesPage } from "./pages/WorkspacesPage";
 import { BoardPage } from "./pages/BoardPage";
@@ -116,6 +116,7 @@ function AuthedRouter({ session }: { session: Session | null }) {
 
 function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSignOut: () => void }) {
   const supabase = getSupabase();
+  const loc = useLocation();
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [isEmailConfirmed, setIsEmailConfirmed] = useState<boolean | null>(null);
 
@@ -130,22 +131,50 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
     });
   }, [supabase]);
 
+  const onBoard = loc.pathname.startsWith("/w/");
+
+  function newTask() {
+    window.dispatchEvent(new Event("tb:newTask"));
+  }
+
+  const meInitials = userEmail ? userEmail.split("@")[0].slice(0, 2).toUpperCase() : "ME";
+
   return (
     <div className="appShell">
       <div className="appTopbar">
         <div className="brandRow">
           <div className="logoMark sm">TB</div>
-          <div className="brandText">TaskBubble</div>
+          <div className="brandText">TaskBubbles</div>
+        </div>
+
+        <div className="navPills">
+          <Link className={`navPill ${loc.pathname === "/workspaces" ? "active" : ""}`} to="/workspaces">
+            Workspaces
+          </Link>
+          <div className={`navPill ${onBoard ? "active" : "disabled"}`}>{onBoard ? "Tasks" : "Tasks"}</div>
+          <div className="navPill disabled">Chat</div>
         </div>
 
         <div className="spacer" />
 
+        {onBoard ? (
+          <button className="primaryBtn headerPrimary" onClick={newTask} type="button">
+            + New Task
+          </button>
+        ) : null}
+
+        <button className="iconBtn" type="button" title="Notifications (coming soon)">
+          <span className="notifDot" />
+          🔔
+        </button>
+
+        <div className="avatarCircle" title={userEmail ?? "User"}>
+          {meInitials}
+        </div>
+
         {userEmail ? (
-          <div className="userPill">
-            <div className="userEmail">{userEmail}</div>
-            <div className={`userBadge ${isEmailConfirmed ? "ok" : "warn"}`}>
-              {isEmailConfirmed ? "confirmed" : "not confirmed"}
-            </div>
+          <div className={`userBadge ${isEmailConfirmed ? "ok" : "warn"}`} title="Email confirmation status">
+            {isEmailConfirmed ? "confirmed" : "not confirmed"}
           </div>
         ) : null}
 
