@@ -1,0 +1,15 @@
+/* Minimal reset – visuals live in app.css */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
