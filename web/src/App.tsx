@@ -5,6 +5,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 import { AuthPage } from "./pages/AuthPage";
 import { WorkspacesPage } from "./pages/WorkspacesPage";
 import { BoardPage } from "./pages/BoardPage";
+import { ProfilePage } from "./pages/ProfilePage";
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -109,6 +110,18 @@ function AuthedRouter({ session }: { session: Session | null }) {
           )
         }
       />
+      <Route
+        path="/profile"
+        element={
+          session ? (
+            <AuthedFrame onSignOut={signOut}>
+              <ProfilePage />
+            </AuthedFrame>
+          ) : (
+            <Navigate to="/auth" replace />
+          )
+        }
+      />
       <Route path="*" element={<Navigate to={session ? "/workspaces" : "/auth"} replace />} />
     </Routes>
   );
@@ -119,6 +132,7 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
   const loc = useLocation();
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [isEmailConfirmed, setIsEmailConfirmed] = useState<boolean | null>(null);
+  const [notifOpen, setNotifOpen] = useState(false);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -132,10 +146,6 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
   }, [supabase]);
 
   const onBoard = loc.pathname.startsWith("/w/");
-
-  function newTask() {
-    window.dispatchEvent(new Event("tb:newTask"));
-  }
 
   const meInitials = userEmail ? userEmail.split("@")[0].slice(0, 2).toUpperCase() : "ME";
 
@@ -151,34 +161,38 @@ function AuthedFrame({ children, onSignOut }: { children: React.ReactNode; onSig
           <Link className={`navPill ${loc.pathname === "/workspaces" ? "active" : ""}`} to="/workspaces">
             Workspaces
           </Link>
-          <div className={`navPill ${onBoard ? "active" : "disabled"}`}>{onBoard ? "Tasks" : "Tasks"}</div>
+          <div className={`navPill ${onBoard ? "active" : "disabled"}`}>Tasks</div>
           <div className="navPill disabled">Chat</div>
+          <Link className={`navPill ${loc.pathname === "/profile" ? "active" : ""}`} to="/profile">
+            Profile
+          </Link>
         </div>
 
         <div className="spacer" />
 
-        {onBoard ? (
-          <button className="primaryBtn headerPrimary" onClick={newTask} type="button">
-            + New Task
-          </button>
-        ) : null}
-
-        <button className="iconBtn" type="button" title="Notifications (coming soon)">
+        <button
+          className="iconBtn"
+          type="button"
+          title="Notifications"
+          onClick={() => setNotifOpen((v) => !v)}
+        >
           <span className="notifDot" />
           🔔
         </button>
+        {notifOpen ? (
+          <div className="popover" role="dialog" aria-label="Notifications">
+            <div className="popoverTitle">Notifications</div>
+            <div className="muted">Coming soon. This confirms the button is clickable.</div>
+          </div>
+        ) : null}
 
         <div className="avatarCircle" title={userEmail ?? "User"}>
           {meInitials}
         </div>
 
-        {userEmail ? (
-          <div className={`userBadge ${isEmailConfirmed ? "ok" : "warn"}`} title="Email confirmation status">
-            {isEmailConfirmed ? "confirmed" : "not confirmed"}
-          </div>
-        ) : null}
+        {/* confirmation status is shown on the Profile page (not in the header) */}
 
-        <button className="secondaryBtn" onClick={onSignOut} type="button">
+        <button className="secondaryBtn headerBtn" onClick={onSignOut} type="button">
           Sign out
         </button>
       </div>

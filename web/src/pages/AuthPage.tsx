@@ -94,7 +94,7 @@ export function AuthPage() {
 
           {error ? <div className="errorBox">{error}</div> : null}
 
-          <button className="primaryBtn" onClick={submit} disabled={!canSubmit || busy} type="button">
+          <button className="primaryBtn btnFull" onClick={submit} disabled={!canSubmit || busy} type="button">
             {busy ? "Working…" : mode === "signin" ? "Sign in" : "Create account"}
           </button>
 

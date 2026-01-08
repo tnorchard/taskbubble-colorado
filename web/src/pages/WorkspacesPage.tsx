@@ -117,7 +117,7 @@ export function WorkspacesPage() {
                   <input value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="Design Team" />
                 </label>
                 <button
-                  className="primaryBtn"
+                  className="primaryBtn btnFull"
                   onClick={createWorkspace}
                   type="button"
                   disabled={busy || !createName.trim()}
@@ -132,7 +132,7 @@ export function WorkspacesPage() {
                   <div className="fieldLabel">Code</div>
                   <input value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="e.g. 7a2c91bf10" />
                 </label>
-                <button className="secondaryBtn" onClick={joinWorkspace} type="button" disabled={busy || !joinCode.trim()}>
+                <button className="secondaryBtn btnFull" onClick={joinWorkspace} type="button" disabled={busy || !joinCode.trim()}>
                   Join
                 </button>
               </div>

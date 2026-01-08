@@ -24,7 +24,7 @@ export function ProfilePage() {
     setError(null);
     const [{ data: userData, error: userErr }, { data: wsData }, { data: taskData }] = await Promise.all([
       supabase.auth.getUser(),
-      supabase.from("workspaces").select("id,name,join_code,created_at"),
+      supabase.from("workspaces").select("id,name,created_at"),
       supabase.from("tasks").select("id,title,description,due_date,status,created_at,created_by,workspace_id"),
     ]);
     if (userErr) setError(userErr.message);
@@ -41,10 +41,12 @@ export function ProfilePage() {
     if (profErr) setError(profErr.message);
     setProfile((profData as Profile) ?? null);
     setDisplayName(profData?.display_name ?? "");
-    setWorkspaces((wsData ?? []) as Workspace[]);
+    const ws = (wsData ?? []) as Workspace[];
+    setWorkspaces(ws);
+    const wsMap = new Map(ws.map((w) => [w.id, w]));
     const mine = (taskData ?? []).filter((t) => t.created_by === uid) as TaskWithWorkspace[];
     mine.forEach((t) => {
-      t.workspace_name = workspaceById.get(t.workspace_id)?.name;
+      t.workspace_name = wsMap.get(t.workspace_id)?.name;
     });
     setTasks(mine);
   }
@@ -106,10 +108,10 @@ export function ProfilePage() {
                 <input value={profile?.email ?? ""} readOnly />
               </label>
               <div className="profileActions">
-                <button className="primaryBtn" onClick={saveProfile} disabled={saving}>
+                <button className="primaryBtn btnFull" onClick={saveProfile} disabled={saving}>
                   {saving ? "Saving…" : "Save"}
                 </button>
-                <button className="secondaryBtn" onClick={sendPasswordReset} type="button">
+                <button className="secondaryBtn btnFull" onClick={sendPasswordReset} type="button">
                   Reset password
                 </button>
               </div>

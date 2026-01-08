@@ -54,7 +54,7 @@ export function BoardPage() {
 
     const wsReq = supabase
       .from("workspaces")
-      .select("id,name,join_code,created_at")
+      .select("id,name,created_at")
       .eq("id", workspaceId)
       .maybeSingle();
     const tReq = supabase
@@ -80,7 +80,6 @@ export function BoardPage() {
     if (mErr) setError(mErr.message);
 
     setWorkspace((ws as Workspace) ?? null);
-    setTasks((t ?? []) as TaskWithAge[]);
 
     const membersRaw = (m ?? []) as WorkspaceMember[];
     const userIds = Array.from(
@@ -190,7 +189,7 @@ export function BoardPage() {
         <div className="boardHeaderLeft">
           <div className="kicker">Workspace</div>
           <div className="boardHeaderTitle">{workspace?.name ?? "Board"}</div>
-          <div className="muted">Join code: {workspace?.join_code ?? "—"}</div>
+          <div className="muted">{members.length} member(s)</div>
         </div>
         <div className="boardHeaderRight">
           <div className="memberRow" title="Workspace members">
