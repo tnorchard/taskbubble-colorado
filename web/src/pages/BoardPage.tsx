@@ -75,6 +75,8 @@ export function BoardPage() {
   const { id } = useParams();
   const workspaceId = id ?? "";
 
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [tasks, setTasks] = useState<RowTask[]>([]);
   const [members, setMembers] = useState<
@@ -87,6 +89,16 @@ export function BoardPage() {
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState<"due" | "title">("due");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  const [urgencyFilter, setUrgencyFilter] = useState<
+    "all" | "asap" | "urgent" | "soon" | "later"
+  >("all");
+  const [companyFilter, setCompanyFilter] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [assignmentFilter, setAssignmentFilter] = useState<
+    "all" | "mine" | "unassigned"
+  >("all");
 
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
@@ -105,10 +117,17 @@ export function BoardPage() {
   const [editCompany, setEditCompany] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const [viewMode, setViewMode] = useState<"board" | "calendar">("board");
+  const [viewMode, setViewMode] = useState<"board" | "calendar" | "list" | "people">("board");
   const [currentMonth, setCurrentMonth] = useState(new Date());
 
   const [popping, setPopping] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    supabase.auth
+      .getUser()
+      .then(({ data }) => setCurrentUserId(data.user?.id ?? null))
+      .catch(() => setCurrentUserId(null));
+  }, [supabase]);
 
   const userColors = useMemo(() => {
     const map = new Map<string, string>();
@@ -464,7 +483,9 @@ export function BoardPage() {
           throw new Error(e1.message);
         }
       }
-      // realtime + load keeps state consistent
+      // realtime will trigger scheduleLoad, but let's do an eager refresh
+      // to ensure the local state is perfectly in sync with the DB order.
+      await load();
     } catch (e) {
       // revert if update failed
       setTasks((cur) =>
@@ -476,8 +497,13 @@ export function BoardPage() {
 
   const filteredSorted = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const list = q
-      ? tasks.filter((t) => {
+    const list = tasks
+      .filter((t) => matchesUrgencyFilter(t))
+      .filter((t) => matchesCompanyFilter(t))
+      .filter((t) => matchesAssignmentFilter(t));
+
+    const textFiltered = q
+      ? list.filter((t) => {
           const titleMatch = t.title.toLowerCase().includes(q);
           const companyMatch = t.company?.toLowerCase().includes(q);
           const responsibleMatch =
@@ -485,9 +511,9 @@ export function BoardPage() {
             t.responsible_profile?.email?.toLowerCase().includes(q);
           return titleMatch || companyMatch || responsibleMatch;
         })
-      : tasks;
+      : list;
 
-    return [...list].sort((a, b) => {
+    return [...textFiltered].sort((a, b) => {
       if (sortKey === "title") {
         const cmp = a.title.toLowerCase().localeCompare(b.title.toLowerCase());
         return sortDir === "asc" ? cmp : -cmp;
@@ -500,7 +526,16 @@ export function BoardPage() {
       const cmp = b.created_at.localeCompare(a.created_at);
       return sortDir === "asc" ? cmp : -cmp;
     });
-  }, [tasks, query, sortKey, sortDir]);
+  }, [
+    tasks,
+    query,
+    sortKey,
+    sortDir,
+    urgencyFilter,
+    companyFilter,
+    assignmentFilter,
+    currentUserId,
+  ]);
 
   const activeTasks = useMemo(
     () => filteredSorted.filter((t) => t.status !== "done"),
@@ -530,8 +565,8 @@ export function BoardPage() {
 
   // Bubbles: hide done tasks (except while popping).
   const bubbleTasks = useMemo(
-    () => tasks.filter((t) => t.status !== "done" || popping.has(t.id)),
-    [tasks, popping],
+    () => filteredSorted.filter((t) => t.status !== "done" || popping.has(t.id)),
+    [filteredSorted, popping],
   );
 
   // Stable layout ordering for physics anchor points.
@@ -583,12 +618,39 @@ export function BoardPage() {
     return `rgba(${r}, ${g}, ${b}, ${0.55 + t * 0.25})`;
   }
 
+  function matchesUrgencyFilter(t: RowTask) {
+    if (urgencyFilter === "all") return true;
+    if (urgencyFilter === "asap") return Boolean(t.is_asap);
+    if (t.is_asap) return false;
+
+    const u = urgencyLevel(t);
+    if (urgencyFilter === "urgent") return u >= 0.7;
+    if (urgencyFilter === "soon") return u >= 0.35 && u < 0.7;
+    if (urgencyFilter === "later") return u < 0.35;
+    return true;
+  }
+
+  function matchesCompanyFilter(t: RowTask) {
+    if (companyFilter.size === 0) return true;
+    if (!t.company) return false;
+    return companyFilter.has(t.company);
+  }
+
+  function matchesAssignmentFilter(t: RowTask) {
+    if (assignmentFilter === "all") return true;
+    if (assignmentFilter === "mine") {
+      return Boolean(currentUserId && t.responsible_id === currentUserId);
+    }
+    if (assignmentFilter === "unassigned") return !t.responsible_id;
+    return true;
+  }
+
   function bubbleVisual(t: RowTask) {
     const now = Date.now();
     const dueMs =
       t.is_asap || !t.due_date ? now : new Date(t.due_date + "T00:00:00").getTime();
     const daysUntilDue = Math.ceil((dueMs - now) / (1000 * 60 * 60 * 24));
-    const size = clamp(154 - daysUntilDue * 10, 92, 168);
+    const size = clamp(94 - daysUntilDue * 6, 58, 112);
     const u = urgencyLevel(t);
     const color = t.responsible_id
       ? userColors.get(t.responsible_id)
@@ -810,6 +872,15 @@ export function BoardPage() {
     }
   };
 
+  const toggleCompanyChip = (c: string) => {
+    setCompanyFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(c)) next.delete(c);
+      else next.add(c);
+      return next;
+    });
+  };
+
   const calendarDays = useMemo(() => {
     const year = currentMonth.getFullYear();
     const month = currentMonth.getMonth();
@@ -914,8 +985,8 @@ export function BoardPage() {
           </div>
         </div>
         <div className="boardHeaderRight">
-          <div className="memberRow" title="Workspace members">
-            {members.slice(0, 6).map(({ profile, member }) => (
+          <div className="memberRow fullList" title="Workspace members">
+            {members.map(({ profile, member }) => (
               <div
                 key={member.user_id}
                 className="memberAvatar"
@@ -925,26 +996,19 @@ export function BoardPage() {
                 {initials(profile?.display_name ?? profile?.email ?? member.user_id)}
               </div>
             ))}
-            {members.length > 6 ? (
-              <div className="memberMore">+{members.length - 6}</div>
-            ) : null}
           </div>
 
-          <div className="viewToggle" style={{ marginLeft: 12 }}>
-            <button
-              className={`viewBtn ${viewMode === "board" ? "active" : ""}`}
-              onClick={() => setViewMode("board")}
-              type="button"
+          <div className="viewDropdownWrapper" style={{ marginLeft: 12 }}>
+            <select
+              className="viewDropdownSelect"
+              value={viewMode}
+              onChange={(e) => setViewMode(e.target.value as any)}
             >
-              Board
-            </button>
-            <button
-              className={`viewBtn ${viewMode === "calendar" ? "active" : ""}`}
-              onClick={() => setViewMode("calendar")}
-              type="button"
-            >
-              Calendar
-            </button>
+              <option value="board">Bubbles</option>
+              <option value="list">List</option>
+              <option value="people">People</option>
+              <option value="calendar">Calendar</option>
+            </select>
           </div>
 
           <button
@@ -1069,8 +1133,75 @@ export function BoardPage() {
           </div>
         </div>
 
-        {viewMode === "board" ? (
-          <div className="bubbleCanvas" ref={canvasRef}>
+        <div className="boardMain">
+          <div className="boardFilters">
+            <div className="boardFilterSet">
+              <span className="filterLabel">Urgency</span>
+              <div className="filterGroup">
+                {["all", "asap", "urgent", "soon", "later"].map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`filterChip ${v === "urgent" ? "danger" : ""} ${urgencyFilter === v ? "active" : ""}`}
+                    onClick={() => setUrgencyFilter(v as any)}
+                  >
+                    {v === "all" ? "ALL" : v.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="boardFilterSet">
+              <span className="filterLabel">Task Type</span>
+              <div className="filterGroup">
+                <button
+                  type="button"
+                  className={`filterChip ${assignmentFilter === "mine" ? "active" : ""}`}
+                  onClick={() => setAssignmentFilter(v => v === "mine" ? "all" : "mine")}
+                >
+                  MINE
+                </button>
+                <button
+                  type="button"
+                  className={`filterChip ${assignmentFilter === "unassigned" ? "active" : ""}`}
+                  onClick={() => setAssignmentFilter(v => v === "unassigned" ? "all" : "unassigned")}
+                >
+                  UNASSIGNED
+                </button>
+              </div>
+            </div>
+
+            <div className="boardFilterSet">
+              <span className="filterLabel">Company</span>
+              <div className="filterGroup">
+                {["BTB", "OTE", "TKO", "Panels", "Ursus"].map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className={`filterChip ${companyFilter.has(c) ? "active" : ""}`}
+                    onClick={() => toggleCompanyChip(c)}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="filterReset"
+              onClick={() => {
+                setUrgencyFilter("all");
+                setAssignmentFilter("all");
+                setCompanyFilter(new Set());
+              }}
+            >
+              RESET
+            </button>
+          </div>
+
+          {viewMode === "board" ? (
+            <div className="bubbleCanvas" ref={canvasRef}>
             <div className="gridOverlay" aria-hidden="true" />
 
           {layoutOrder.map((t) => {
@@ -1125,6 +1256,135 @@ export function BoardPage() {
                 <div className="muted">Create a task and watch it float.</div>
               </div>
             ) : null}
+          </div>
+        ) : viewMode === "list" ? (
+          <div className="listViewCanvas">
+            <div className="listViewHeader">
+              <div className="listViewTitle">Task List</div>
+              <div className="muted">{filteredSorted.length} tasks</div>
+            </div>
+            <div className="listViewScroll">
+              {filteredSorted.map((t) => (
+                <div
+                  key={t.id}
+                  className={`listViewRow ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
+                  onClick={() => setSelectedId(t.id)}
+                >
+                  <div className="listViewStatus">
+                    <button
+                      type="button"
+                      className={`statusCircle ${t.status}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void setTaskStatus(t.id, t.status === "done" ? "open" : "done");
+                      }}
+                    >
+                      {t.status === "done" ? "✓" : ""}
+                    </button>
+                  </div>
+                  <div className="listViewContent">
+                    <div className="listViewMain">
+                      <div className="listViewTaskTitle">{t.title}</div>
+                      {t.is_asap && <span className="asapBadge">ASAP</span>}
+                    </div>
+                    <div className="listViewMeta">
+                      <span className="metaItem">📅 {formatDue(t.due_date, t.is_asap)}</span>
+                      <span className="metaItem">⏱️ {formatAgeHours(t.age_hours)}</span>
+                      {t.company && <span className="metaItem company">🏢 {t.company}</span>}
+                      {t.responsible_profile && (
+                        <span className="metaItem responsible">
+                          👤 {t.responsible_profile.display_name ?? t.responsible_profile.email}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="listViewChevron">›</div>
+                </div>
+              ))}
+              {filteredSorted.length === 0 && (
+                <div className="emptyCenter">
+                  <div className="emptyTitle">No tasks found</div>
+                  <div className="muted">Try adjusting your filters or search.</div>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : viewMode === "people" ? (
+          <div className="peopleViewCanvas">
+            <div className="peopleViewScroll horizontallyScrollable">
+              {members.map(({ profile, member }) => {
+                const personTasks = filteredSorted.filter(
+                  (t) => t.responsible_id === member.user_id
+                );
+                const color = userColors.get(member.user_id) || "var(--primary)";
+                
+                return (
+                  <div key={member.user_id} className="personColumn">
+                    <div className="personHeader" style={{ ["--user-color" as any]: color }}>
+                      <div className="personAvatar">
+                        {initials(profile?.display_name ?? profile?.email ?? member.user_id)}
+                      </div>
+                      <div className="personInfo">
+                        <div className="personName">
+                          {profile?.display_name ?? profile?.email?.split("@")[0] ?? "User"}
+                        </div>
+                        <div className="personTaskCount">{personTasks.length} tasks</div>
+                      </div>
+                    </div>
+                    <div className="personTasksScroll">
+                      {personTasks.map((t) => (
+                        <div
+                          key={t.id}
+                          className={`personTaskCard ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
+                          onClick={() => setSelectedId(t.id)}
+                        >
+                          <div className="personTaskTitle">{t.title}</div>
+                          <div className="personTaskMeta">
+                            <span className="personTaskChip">{formatDue(t.due_date, t.is_asap)}</span>
+                            {t.company && <span className="personTaskChip company">{t.company}</span>}
+                          </div>
+                        </div>
+                      ))}
+                      {personTasks.length === 0 && (
+                        <div className="personEmpty">No tasks assigned</div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+              
+              {/* Unassigned Column */}
+              {filteredSorted.some(t => !t.responsible_id) && (
+                <div className="personColumn unassigned">
+                  <div className="personHeader">
+                    <div className="personAvatar">?</div>
+                    <div className="personInfo">
+                      <div className="personName">Unassigned</div>
+                      <div className="personTaskCount">
+                        {filteredSorted.filter(t => !t.responsible_id).length} tasks
+                      </div>
+                    </div>
+                  </div>
+                  <div className="personTasksScroll">
+                    {filteredSorted
+                      .filter(t => !t.responsible_id)
+                      .map((t) => (
+                        <div
+                          key={t.id}
+                          className={`personTaskCard ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
+                          onClick={() => setSelectedId(t.id)}
+                        >
+                          <div className="personTaskTitle">{t.title}</div>
+                          <div className="personTaskMeta">
+                            <span className="personTaskChip">{formatDue(t.due_date, t.is_asap)}</span>
+                            {t.company && <span className="personTaskChip company">{t.company}</span>}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           <div className="calendarCanvas">
@@ -1233,9 +1493,10 @@ export function BoardPage() {
             </div>
           </div>
         )}
+      </div>
 
-        <div className="sidePanel">
-          <div className="sideCard">
+      <div className="sidePanel">
+        <div className="sideCard">
             <div className="panelTitleRow">
               <div className="panelTitle">Details</div>
               {selected && !isEditing ? (
