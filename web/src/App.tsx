@@ -54,8 +54,11 @@ function AuthedRouter({ session }: { session: Session | null }) {
   // Public routes (landing + auth) — accessible without session
   const isPublicRoute = loc.pathname === "/" || loc.pathname === "/auth";
 
-  // Redirect authenticated users away from public pages
-  if (session && isPublicRoute) return <Navigate to="/workspaces" replace />;
+  // Don't redirect away from /auth if there's a recovery hash (password reset flow)
+  const isRecovery = loc.pathname === "/auth" && (loc.hash.includes("type=recovery") || loc.search.includes("type=recovery"));
+
+  // Redirect authenticated users away from public pages (unless password recovery)
+  if (session && isPublicRoute && !isRecovery) return <Navigate to="/workspaces" replace />;
 
   return (
     <Routes>

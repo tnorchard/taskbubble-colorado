@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useLocation } from "react-router-dom";
 import { getSupabase } from "../lib/supabaseClient";
 
-type Mode = "signin" | "signup" | "forgot";
+type Mode = "signin" | "signup" | "forgot" | "reset";
 
 export function AuthPage() {
   const supabase = getSupabase();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
+
+  // Detect password recovery from Supabase email link
+  const isRecovery = location.hash.includes("type=recovery") || searchParams.get("type") === "recovery";
 
   const [mode, setMode] = useState<Mode>(() => {
+    if (isRecovery) return "reset";
     const m = searchParams.get("mode");
     if (m === "signup") return "signup";
     return "signin";
@@ -16,22 +21,31 @@ export function AuthPage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  // Switch to reset mode when recovery is detected
+  useEffect(() => {
+    if (isRecovery) setMode("reset");
+  }, [isRecovery]);
+
   // Reset messages when switching modes
   useEffect(() => { setError(null); setSuccess(null); }, [mode]);
 
   const canSubmit = useMemo(() => {
+    if (mode === "reset") {
+      return password.length >= 6 && password === confirmPassword;
+    }
     if (!email.trim() || email.trim().length < 4) return false;
     if (mode === "forgot") return true;
     if (password.length < 6) return false;
     if (mode === "signup" && !fullName.trim()) return false;
     return true;
-  }, [email, password, fullName, mode]);
+  }, [email, password, confirmPassword, fullName, mode]);
 
   function friendlyError(msg: string): string {
     if (msg.includes("rate limit") || msg.includes("rate_limit"))
@@ -51,6 +65,15 @@ export function AuthPage() {
     setError(null);
     setSuccess(null);
     try {
+      if (mode === "reset") {
+        if (password !== confirmPassword) { setError("Passwords don't match."); return; }
+        const { error: e } = await supabase.auth.updateUser({ password });
+        if (e) throw e;
+        setSuccess("Password updated! Redirecting to your workspaces…");
+        setTimeout(() => { window.location.href = "/workspaces"; }, 1500);
+        return;
+      }
+
       if (mode === "forgot") {
         const { error: e } = await supabase.auth.resetPasswordForEmail(email.trim(), {
           redirectTo: `${window.location.origin}/auth`,
@@ -101,6 +124,7 @@ export function AuthPage() {
     signin: { title: "Welcome back", sub: "Sign in to access your workspaces." },
     signup: { title: "Create your account", sub: "Set up your profile and get started." },
     forgot: { title: "Reset your password", sub: "Enter your email and we'll send you a reset link." },
+    reset: { title: "Set new password", sub: "Choose a new password for your account." },
   };
 
   return (
@@ -116,7 +140,7 @@ export function AuthPage() {
       <div className="authPageCenter">
         <div className="authCard3">
           {/* Tabs — only show for signin / signup */}
-          {mode !== "forgot" ? (
+          {mode !== "forgot" && mode !== "reset" ? (
             <div className="authTabs3">
               <button className={`authTab3 ${mode === "signin" ? "active" : ""}`} onClick={() => setMode("signin")} type="button" disabled={busy}>
                 Sign In
@@ -153,31 +177,53 @@ export function AuthPage() {
             </>
           ) : null}
 
-          {/* Email */}
-          <label className="authField">
-            <div className="authFieldLabel">Email <span className="authRequired">*</span></div>
-            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email"
-              placeholder="you@company.com" autoComplete="email" />
-          </label>
+          {/* Reset mode: new password + confirm */}
+          {mode === "reset" ? (
+            <>
+              <label className="authField">
+                <div className="authFieldLabel">New Password <span className="authRequired">*</span></div>
+                <input value={password} onChange={(e) => setPassword(e.target.value)} type="password"
+                  placeholder="At least 6 characters" autoComplete="new-password" />
+              </label>
+              <label className="authField">
+                <div className="authFieldLabel">Confirm Password <span className="authRequired">*</span></div>
+                <input value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password"
+                  placeholder="Re-enter your password" autoComplete="new-password"
+                  onKeyDown={(e) => { if (e.key === "Enter") void submit(); }} />
+                {password && confirmPassword && password !== confirmPassword ? (
+                  <div className="authFieldHint" style={{ color: "#ef4444" }}>Passwords don't match</div>
+                ) : null}
+              </label>
+            </>
+          ) : (
+            <>
+              {/* Email */}
+              <label className="authField">
+                <div className="authFieldLabel">Email <span className="authRequired">*</span></div>
+                <input value={email} onChange={(e) => setEmail(e.target.value)} type="email"
+                  placeholder="you@company.com" autoComplete="email" />
+              </label>
 
-          {/* Password — not shown on forgot */}
-          {mode !== "forgot" ? (
-            <label className="authField">
-              <div className="authFieldLabel">Password <span className="authRequired">*</span></div>
-              <input value={password} onChange={(e) => setPassword(e.target.value)} type="password"
-                placeholder="At least 6 characters" autoComplete={mode === "signin" ? "current-password" : "new-password"}
-                onKeyDown={(e) => { if (e.key === "Enter") void submit(); }} />
-            </label>
-          ) : null}
+              {/* Password — not shown on forgot */}
+              {mode !== "forgot" ? (
+                <label className="authField">
+                  <div className="authFieldLabel">Password <span className="authRequired">*</span></div>
+                  <input value={password} onChange={(e) => setPassword(e.target.value)} type="password"
+                    placeholder="At least 6 characters" autoComplete={mode === "signin" ? "current-password" : "new-password"}
+                    onKeyDown={(e) => { if (e.key === "Enter") void submit(); }} />
+                </label>
+              ) : null}
 
-          {/* Forgot password link (sign-in mode only) */}
-          {mode === "signin" ? (
-            <div className="authForgotRow">
-              <button type="button" className="authForgotLink" onClick={() => setMode("forgot")}>
-                Forgot your password?
-              </button>
-            </div>
-          ) : null}
+              {/* Forgot password link (sign-in mode only) */}
+              {mode === "signin" ? (
+                <div className="authForgotRow">
+                  <button type="button" className="authForgotLink" onClick={() => setMode("forgot")}>
+                    Forgot your password?
+                  </button>
+                </div>
+              ) : null}
+            </>
+          )}
 
           {/* Submit */}
           <button className="authSubmitBtn" onClick={() => void submit()} disabled={!canSubmit || busy} type="button">
@@ -187,6 +233,8 @@ export function AuthPage() {
               ? "Sign In"
               : mode === "signup"
               ? "Create Account"
+              : mode === "reset"
+              ? "Update Password"
               : "Send Reset Link"}
           </button>
 
@@ -196,6 +244,8 @@ export function AuthPage() {
               <span>Don't have an account? <button type="button" className="authSwitchLink" onClick={() => setMode("signup")}>Sign up</button></span>
             ) : mode === "signup" ? (
               <span>Already have an account? <button type="button" className="authSwitchLink" onClick={() => setMode("signin")}>Sign in</button></span>
+            ) : mode === "reset" ? (
+              <span>&nbsp;</span>
             ) : (
               <span>Remember your password? <button type="button" className="authSwitchLink" onClick={() => setMode("signin")}>Back to sign in</button></span>
             )}
