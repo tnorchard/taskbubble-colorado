@@ -268,7 +268,7 @@ export function ChatPage() {
     enrichProfiles(msgs.map((m) => m.user_id));
     loadTasksFromIds(msgs.map((m) => m.task_id));
     void loadReactions(msgs.map((m) => m.id), "channel");
-    setTimeout(() => scrollToBottom(), 100);
+    setTimeout(() => snapToBottom(), 100);
   }
 
   /* ── Load DM messages ── */
@@ -295,7 +295,7 @@ export function ChatPage() {
       .eq("sender_id", partnerId)
       .eq("read", false);
 
-    setTimeout(() => scrollToBottom(), 100);
+    setTimeout(() => snapToBottom(), 100);
   }
 
   /* __ Load thread messages __ */
@@ -314,7 +314,7 @@ export function ChatPage() {
     enrichProfiles(msgs.map((m) => m.user_id));
     loadTasksFromIds(msgs.map((m) => m.task_id));
     void loadReactions(msgs.map((m) => m.id), "thread");
-    setTimeout(() => scrollToBottom(), 100);
+    setTimeout(() => snapToBottom(), 100);
   }
 
   /* ── Load channel members ── */
@@ -357,6 +357,13 @@ export function ChatPage() {
     };
     // Double-rAF ensures React has flushed DOM before we scroll
     requestAnimationFrame(() => requestAnimationFrame(doScroll));
+  }
+
+  // Extra delayed snaps keep the view at the latest message after late layout shifts.
+  function snapToBottom(smooth = false) {
+    scrollToBottom(smooth);
+    window.setTimeout(() => scrollToBottom(smooth), 80);
+    window.setTimeout(() => scrollToBottom(smooth), 220);
   }
 
   /* ── Reactions helpers ── */
@@ -449,7 +456,7 @@ export function ChatPage() {
   useEffect(() => {
     const count = view.kind === "channel" ? messages.length : view.kind === "dm" ? dmMessages.length : threadMessages.length;
     if (count > 0 && prevMsgCount.current === 0) {
-      setTimeout(() => scrollToBottom(), 60);
+      setTimeout(() => snapToBottom(), 60);
     }
     prevMsgCount.current = count;
   }, [messages.length, dmMessages.length, threadMessages.length, view.kind]);
@@ -462,23 +469,24 @@ export function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allUsers]);
 
+  const channelWsId = view.kind === "channel" ? view.wsId : null;
   /* ── Realtime: channel ── */
   useEffect(() => {
-    if (view.kind !== "channel") return;
-    void loadMessages(view.wsId);
-    void loadChannelMembers(view.wsId);
+    if (!channelWsId) return;
+    void loadMessages(channelWsId);
+    void loadChannelMembers(channelWsId);
 
-    const isGeneral = view.wsId === GENERAL_ID;
-    const channelFilter = isGeneral ? "workspace_id=is.null" : `workspace_id=eq.${view.wsId}`;
-
+    const isGeneral = channelWsId === GENERAL_ID;
     const channel = supabase
-      .channel(`chat:${view.wsId}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages", filter: channelFilter }, (payload) => {
+      .channel(`chat:${channelWsId}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages" }, (payload) => {
         const msg = payload.new as ChatMsg;
+        const belongsToActiveChannel = isGeneral ? msg.workspace_id === null : msg.workspace_id === channelWsId;
+        if (!belongsToActiveChannel) return;
         setMessages((prev) => {
           // Dedup: skip if real ID exists OR if an optimistic version matches
           if (prev.some((m) => m.id === msg.id)) return prev;
-          // Remove optimistic version (same user, same body, within 10s)
+          // Remove optimistic version (same user, same body)
           const cleaned = prev.filter((m) => {
             if (!m.id.startsWith("opt-")) return true;
             return !(m.user_id === msg.user_id && m.body === msg.body);
@@ -492,12 +500,13 @@ export function ChatPage() {
       .subscribe();
 
     return () => { void supabase.removeChannel(channel); };
-  }, [view.kind === "channel" ? (view as any).wsId : null]);
+  }, [channelWsId, supabase]);
 
+  const dmPartnerId = view.kind === "dm" ? view.partnerId : null;
   /* ── Realtime: DM ── */
   useEffect(() => {
-    if (view.kind !== "dm") return;
-    const partnerId = (view as { kind: "dm"; partnerId: string }).partnerId;
+    if (!dmPartnerId) return;
+    const partnerId = dmPartnerId;
     void loadDmMessages(partnerId);
 
     const channel = supabase
@@ -520,12 +529,13 @@ export function ChatPage() {
       .subscribe();
 
     return () => { void supabase.removeChannel(channel); };
-  }, [view.kind === "dm" ? (view as any).partnerId : null, uid]);
+  }, [dmPartnerId, uid, supabase]);
 
+  const activeThreadId = view.kind === "thread" ? view.threadId : null;
   /* ── Realtime: thread ── */
   useEffect(() => {
-    if (view.kind !== "thread") return;
-    const threadId = (view as { kind: "thread"; threadId: string }).threadId;
+    if (!activeThreadId) return;
+    const threadId = activeThreadId;
     void loadThreadMessages(threadId);
 
     const channel = supabase
@@ -547,7 +557,7 @@ export function ChatPage() {
       .subscribe();
 
     return () => { void supabase.removeChannel(channel); };
-  }, [view.kind === "thread" ? (view as any).threadId : null]);
+  }, [activeThreadId, supabase]);
 
   /* ── Realtime: reactions (preserve scroll on updates) ── */
   useEffect(() => {
