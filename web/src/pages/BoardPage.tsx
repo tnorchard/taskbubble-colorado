@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { getSupabase } from "../lib/supabaseClient";
 import type {
   Profile,
   TaskStatus,
   TaskWithAge,
+  TaskComment,
+  AuditLogEntry,
   Workspace,
   WorkspaceMember,
 } from "../types";
@@ -36,16 +38,6 @@ function formatAgeHours(age: number) {
   return rem ? `${days}d ${rem}h` : `${days}d`;
 }
 
-function formatDateTime(d: string) {
-  const dt = new Date(d);
-  return dt.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
 function initials(name: string) {
   const n = name.includes("@") ? name.split("@")[0] : name;
   const parts = n
@@ -72,6 +64,7 @@ type SimNode = {
 
 export function BoardPage() {
   const supabase = getSupabase();
+  const nav = useNavigate();
   const { id } = useParams();
   const workspaceId = id ?? "";
 
@@ -85,13 +78,16 @@ export function BoardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Hover popup for member dots
+  const [hoverMember, setHoverMember] = useState<{ profile: Profile; rect: DOMRect } | null>(null);
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState<"due" | "title">("due");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const [urgencyFilter, setUrgencyFilter] = useState<
-    "all" | "asap" | "urgent" | "soon" | "later"
+    "all" | "asap" | "urgent"
   >("all");
   const [companyFilter, setCompanyFilter] = useState<Set<string>>(
     () => new Set(),
@@ -105,7 +101,9 @@ export function BoardPage() {
   const [asap, setAsap] = useState(false);
   const [description, setDescription] = useState("");
   const [responsibleId, setResponsibleId] = useState("");
+  const COMPANY_PRESETS = ["BTB", "Panels", "TKO", "Eugene", "Bloomberg", "Media", "Other", "None"] as const;
   const [company, setCompany] = useState("");
+  const [customCompany, setCustomCompany] = useState("");
   const [creating, setCreating] = useState(false);
 
   const [isEditing, setIsEditing] = useState(false);
@@ -115,12 +113,68 @@ export function BoardPage() {
   const [editDescription, setEditDescription] = useState("");
   const [editResponsibleId, setEditResponsibleId] = useState("");
   const [editCompany, setEditCompany] = useState("");
+  const [editCustomCompany, setEditCustomCompany] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const [viewMode, setViewMode] = useState<"board" | "calendar" | "list" | "people">("board");
-  const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [viewMode, setViewMode] = useState<"board" | "list" | "people" | "kanban">("board");
+
+  // Resizable sidebar
+  const [sidebarWidth, setSidebarWidth] = useState(320);
+  const isDragging = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartW = useRef(320);
+
+  function onResizeStart(e: React.MouseEvent) {
+    isDragging.current = true;
+    dragStartX.current = e.clientX;
+    dragStartW.current = sidebarWidth;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      if (!isDragging.current) return;
+      const delta = dragStartX.current - ev.clientX;
+      const newW = Math.max(280, Math.min(600, dragStartW.current + delta));
+      setSidebarWidth(newW);
+    };
+    const onUp = () => {
+      isDragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
 
   const [popping, setPopping] = useState<Set<string>>(() => new Set());
+
+  const [sidebarMode, setSidebarMode] = useState<"list" | "details" | "create">("list");
+
+  // Task comments
+  const [comments, setComments] = useState<(TaskComment & { profile?: Profile | null })[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentBody, setCommentBody] = useState("");
+  const [commentSending, setCommentSending] = useState(false);
+  const commentsEndRef = useRef<HTMLDivElement>(null);
+
+  // Audit log
+  const [auditLog, setAuditLog] = useState<(AuditLogEntry & { actor_profile?: Profile | null })[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [showAudit, setShowAudit] = useState(false);
+
+  // Kanban drag
+  const [dragId, setDragId] = useState<string | null>(null);
+
+  // Workspace quick-switch
+  const [allWorkspaces, setAllWorkspaces] = useState<Array<{ id: string; name: string }>>([]);
+  const [wsDropOpen, setWsDropOpen] = useState(false);
+
+  useEffect(() => {
+    if (selectedId) {
+      setSidebarMode("details");
+    }
+  }, [selectedId]);
 
   useEffect(() => {
     supabase.auth
@@ -132,18 +186,23 @@ export function BoardPage() {
   const userColors = useMemo(() => {
     const map = new Map<string, string>();
     const palette = [
-      "#64b5ff", // blue
-      "#a885ff", // purple
-      "#ff85a1", // pink
-      "#ffb385", // orange
-      "#85ff9e", // green
-      "#85fff3", // teal
-      "#ffeb85", // yellow
-      "#ff85f3", // magenta
+      "#64b5ff", "#a885ff", "#ff85a1", "#ffb385",
+      "#85ff9e", "#85fff3", "#ffeb85", "#ff85f3",
+      "#ef4444", "#f97316", "#eab308", "#22c55e",
+      "#06b6d4", "#3b82f6", "#8b5cf6", "#ec4899",
+      "#f43f5e", "#d946ef", "#14b8a6", "#84cc16",
+      "#6366f1", "#0ea5e9", "#f59e0b", "#10b981",
     ];
-    members.forEach(({ member }) => {
-      const h = hash(member.user_id);
-      map.set(member.user_id, palette[h % palette.length]);
+    let fallbackIdx = 0;
+    members.forEach(({ member, profile }) => {
+      const chosen = profile?.user_color;
+      if (chosen) {
+        map.set(member.user_id, chosen);
+      } else {
+        // Use position-based fallback so each member gets a distinct color
+        map.set(member.user_id, palette[fallbackIdx % palette.length]);
+        fallbackIdx++;
+      }
     });
     return map;
   }, [members]);
@@ -220,10 +279,15 @@ export function BoardPage() {
       ]),
     );
 
+    // Also load all workspaces for quick-switch
+    supabase.from("workspaces").select("id,name").order("name").then(({ data: allWs }) => {
+      setAllWorkspaces((allWs ?? []) as Array<{ id: string; name: string }>);
+    });
+
     if (userIds.length) {
       const { data: profilesData } = await supabase
         .from("profiles")
-        .select("id,email,display_name,avatar_url")
+        .select("id,email,display_name,avatar_url,user_color")
         .in("id", userIds);
       const profiles = (profilesData ?? []) as Profile[];
       const byId = new Map(profiles.map((p) => [p.id, p]));
@@ -285,7 +349,10 @@ export function BoardPage() {
     setEditAsap(Boolean(selected.is_asap));
     setEditDescription(selected.description);
     setEditResponsibleId(selected.responsible_id ?? "");
-    setEditCompany(selected.company ?? "");
+    const co = selected.company ?? "";
+    const isPreset = COMPANY_PRESETS.includes(co as any) || co === "";
+    setEditCompany(isPreset ? co : "Other");
+    setEditCustomCompany(isPreset ? "" : co);
     setIsEditing(false);
   }, [selected]);
 
@@ -336,7 +403,7 @@ export function BoardPage() {
         workspace_id: workspaceId,
         status: "open" satisfies TaskStatus,
         responsible_id: responsibleId || null,
-        company: company || null,
+        company: (company === "Other" ? customCompany.trim() : company === "None" ? "" : company) || null,
         is_asap: asap,
       });
       if (e) throw new Error(e.message);
@@ -347,7 +414,12 @@ export function BoardPage() {
       setDescription("");
       setResponsibleId("");
       setCompany("");
-      // realtime will refresh, but do an eager refresh for responsiveness
+      setCustomCompany("");
+      await logAudit("task_created", null, { title: title.trim() });
+      // Notify responsible if assigned
+      if (responsibleId && responsibleId !== uid) {
+        try { await supabase.from("notifications").insert({ user_id: responsibleId, kind: "task_assigned", title: `You were assigned "${title.trim()}"`, workspace_id: workspaceId, actor_id: uid }); } catch { /* table may not exist */ }
+      }
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
@@ -368,11 +440,16 @@ export function BoardPage() {
           due_date: editAsap ? null : editDueDate,
           description: editDescription.trim(),
           responsible_id: editResponsibleId || null,
-          company: editCompany || null,
+          company: (editCompany === "Other" ? editCustomCompany.trim() : editCompany === "None" ? "" : editCompany) || null,
           is_asap: editAsap,
         })
         .eq("id", selected.id);
       if (e) throw new Error(e.message);
+      await logAudit("task_updated", selected.id, { title: editTitle.trim() });
+      // Notify if reassigned
+      if (editResponsibleId && editResponsibleId !== selected.responsible_id && editResponsibleId !== currentUserId) {
+        try { await supabase.from("notifications").insert({ user_id: editResponsibleId, kind: "task_assigned", title: `You were assigned "${editTitle.trim()}"`, workspace_id: workspaceId, actor_id: currentUserId }); } catch { /* ok */ }
+      }
       setIsEditing(false);
       await load();
     } catch (e) {
@@ -387,6 +464,7 @@ export function BoardPage() {
     setBusy(true);
     setError(null);
     try {
+      await logAudit("task_deleted", selected.id, { title: selected.title });
       const { error: e } = await supabase
         .from("tasks")
         .delete()
@@ -483,9 +561,14 @@ export function BoardPage() {
           throw new Error(e1.message);
         }
       }
-      // realtime will trigger scheduleLoad, but let's do an eager refresh
-      // to ensure the local state is perfectly in sync with the DB order.
-      await load();
+      await logAudit(next === "done" ? "task_completed" : "task_reopened", taskId, { from: prev, to: next });
+      // Notify task creator on completion
+      const theTask = tasks.find((t) => t.id === taskId);
+      if (next === "done" && theTask?.created_by && theTask.created_by !== uid) {
+        try { await supabase.from("notifications").insert({ user_id: theTask.created_by, kind: "task_completed", title: `"${theTask.title}" was completed`, workspace_id: workspaceId, actor_id: uid }); } catch { /* ok */ }
+      }
+      // No full reload — optimistic update already applied above
+      setDragId(null);
     } catch (e) {
       // revert if update failed
       setTasks((cur) =>
@@ -493,6 +576,85 @@ export function BoardPage() {
       );
       setError(e instanceof Error ? e.message : "Unknown error");
     }
+  }
+
+  // ── Comments ──
+  async function loadComments(taskId: string) {
+    setCommentsLoading(true);
+    const { data } = await supabase.from("task_comments").select("*").eq("task_id", taskId).order("created_at", { ascending: true });
+    const rows = (data ?? []) as TaskComment[];
+    const uids = Array.from(new Set(rows.map((c) => c.user_id)));
+    let profMap = new Map<string, Profile>();
+    if (uids.length) {
+      const { data: profs } = await supabase.from("profiles").select("id,email,display_name,avatar_url,user_color").in("id", uids);
+      ((profs ?? []) as Profile[]).forEach((p) => profMap.set(p.id, p));
+    }
+    setComments(rows.map((c) => ({ ...c, profile: profMap.get(c.user_id) ?? null })));
+    setCommentsLoading(false);
+    setTimeout(() => commentsEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+  }
+
+  useEffect(() => {
+    if (selected) void loadComments(selected.id);
+    else setComments([]);
+  }, [selected?.id]);
+
+  // Realtime comments
+  useEffect(() => {
+    if (!selected) return;
+    const ch = supabase.channel(`comments:${selected.id}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "task_comments", filter: `task_id=eq.${selected.id}` },
+        () => void loadComments(selected.id))
+      .subscribe();
+    return () => { void supabase.removeChannel(ch); };
+  }, [selected?.id]);
+
+  async function addComment() {
+    if (!commentBody.trim() || !selected || !currentUserId) return;
+    setCommentSending(true);
+    await supabase.from("task_comments").insert({ task_id: selected.id, user_id: currentUserId, body: commentBody.trim() });
+    // Also log audit
+    try { await supabase.from("audit_log").insert({ workspace_id: workspaceId, task_id: selected.id, actor_id: currentUserId, action: "comment_added", details: { body: commentBody.trim().slice(0, 100) } }); } catch { /* ok */ }
+    // Notify task creator/responsible
+    const targets = new Set<string>();
+    if (selected.created_by && selected.created_by !== currentUserId) targets.add(selected.created_by);
+    if (selected.responsible_id && selected.responsible_id !== currentUserId) targets.add(selected.responsible_id);
+    for (const uid of targets) {
+      try { await supabase.from("notifications").insert({ user_id: uid, kind: "mention", title: `New comment on "${selected.title}"`, body: commentBody.trim().slice(0, 100), workspace_id: workspaceId, task_id: selected.id, actor_id: currentUserId }); } catch { /* ok */ }
+    }
+    setCommentBody("");
+    setCommentSending(false);
+  }
+
+  // ── Audit log ──
+  async function loadAuditLog() {
+    setAuditLoading(true);
+    const { data } = await supabase.from("audit_log").select("*").eq("workspace_id", workspaceId).order("created_at", { ascending: false }).limit(50);
+    const rows = (data ?? []) as AuditLogEntry[];
+    const uids = Array.from(new Set(rows.map((e) => e.actor_id).filter(Boolean) as string[]));
+    let profMap = new Map<string, Profile>();
+    if (uids.length) {
+      const { data: profs } = await supabase.from("profiles").select("id,email,display_name,avatar_url,user_color").in("id", uids);
+      ((profs ?? []) as Profile[]).forEach((p) => profMap.set(p.id, p));
+    }
+    setAuditLog(rows.map((e) => ({ ...e, actor_profile: e.actor_id ? profMap.get(e.actor_id) ?? null : null })));
+    setAuditLoading(false);
+  }
+
+  // ── Audit helper ──
+  async function logAudit(action: string, taskId?: string | null, details?: Record<string, unknown>) {
+    if (!currentUserId) return;
+    try { await supabase.from("audit_log").insert({ workspace_id: workspaceId, task_id: taskId ?? null, actor_id: currentUserId, action, details: details ?? {} }); } catch { /* ok */ }
+  }
+
+  // ── Kanban drag-drop ──
+  function onDragStart(id: string) { setDragId(id); }
+  async function onDropColumn(status: TaskStatus) {
+    if (!dragId) return;
+    const task = tasks.find((t) => t.id === dragId);
+    if (!task || task.status === status) { setDragId(null); return; }
+    await setTaskStatus(dragId, status);
+    setDragId(null);
   }
 
   const filteredSorted = useMemo(() => {
@@ -514,6 +676,13 @@ export function BoardPage() {
       : list;
 
     return [...textFiltered].sort((a, b) => {
+      // In list view, push completed tasks to the bottom
+      if (viewMode === "list") {
+        const aDone = a.status === "done" ? 1 : 0;
+        const bDone = b.status === "done" ? 1 : 0;
+        if (aDone !== bDone) return aDone - bDone;
+      }
+
       if (sortKey === "title") {
         const cmp = a.title.toLowerCase().localeCompare(b.title.toLowerCase());
         return sortDir === "asc" ? cmp : -cmp;
@@ -535,6 +704,7 @@ export function BoardPage() {
     companyFilter,
     assignmentFilter,
     currentUserId,
+    viewMode,
   ]);
 
   const activeTasks = useMemo(
@@ -545,12 +715,6 @@ export function BoardPage() {
     () => filteredSorted.filter((t) => t.status === "done"),
     [filteredSorted],
   );
-
-  // Summary logic
-  const oldestTask = useMemo(() => {
-    if (tasks.length === 0) return null;
-    return [...tasks].sort((a, b) => a.created_at.localeCompare(b.created_at))[0];
-  }, [tasks]);
 
   const completedTodayCount = useMemo(() => {
     const startOfToday = new Date();
@@ -610,12 +774,12 @@ export function BoardPage() {
   }
 
   function urgencyColor(u: number) {
-    // Interpolate from orange -> red as urgency increases.
+    // Interpolate from warm amber (low urgency) -> deep blood-red (high urgency)
     const t = clamp(u, 0, 1);
     const r = Math.round(255);
-    const g = Math.round(150 - t * 120); // 150 -> 30
-    const b = Math.round(60 - t * 50); // 60 -> 10
-    return `rgba(${r}, ${g}, ${b}, ${0.55 + t * 0.25})`;
+    const g = Math.round(180 - t * 170); // 180 -> 10
+    const b = Math.round(80 - t * 75);  // 80  -> 5
+    return `rgba(${r}, ${g}, ${b}, ${0.55 + t * 0.35})`;
   }
 
   function matchesUrgencyFilter(t: RowTask) {
@@ -625,8 +789,7 @@ export function BoardPage() {
 
     const u = urgencyLevel(t);
     if (urgencyFilter === "urgent") return u >= 0.7;
-    if (urgencyFilter === "soon") return u >= 0.35 && u < 0.7;
-    if (urgencyFilter === "later") return u < 0.35;
+    // "soon" and "later" removed
     return true;
   }
 
@@ -645,17 +808,41 @@ export function BoardPage() {
     return true;
   }
 
+  /** Age-based redness: the longer a task has existed, the redder it gets.
+   *  Starts tinting after 12h, fully red by ~7 days. */
+  function ageRedTint(ageHours: number): number {
+    return clamp((ageHours - 12) / (7 * 24 - 12), 0, 1); // 0..1
+  }
+
   function bubbleVisual(t: RowTask) {
     const now = Date.now();
     const dueMs =
       t.is_asap || !t.due_date ? now : new Date(t.due_date + "T00:00:00").getTime();
     const daysUntilDue = Math.ceil((dueMs - now) / (1000 * 60 * 60 * 24));
-    const size = clamp(94 - daysUntilDue * 6, 58, 112);
-    const u = urgencyLevel(t);
-    const color = t.responsible_id
-      ? userColors.get(t.responsible_id)
-      : urgencyColor(u);
-    return { size, r: size / 2, color, u };
+
+    // Blend urgency + age to decide redness
+    const ageFactor = ageRedTint(t.age_hours);
+    const redFactor = Math.max(urgencyLevel(t), ageFactor);
+    const isAsap = Boolean(t.is_asap);
+
+    // Size: base + age growth (old tasks grow up to 10px bigger)
+    const size = clamp(98 - daysUntilDue * 5 + ageFactor * 10, 60, 130);
+
+    let color: string | undefined;
+
+    if (t.responsible_id) {
+      const base = userColors.get(t.responsible_id) ?? "rgba(100,181,255,0.6)";
+
+      if (ageFactor > 0.1) {
+        color = `color-mix(in srgb, ${base} ${Math.round((1 - ageFactor * 0.6) * 100)}%, ${urgencyColor(redFactor)})`;
+      } else {
+        color = base;
+      }
+    } else {
+      color = urgencyColor(redFactor);
+    }
+
+    return { size, r: size / 2, color, u: redFactor, isAsap };
   }
 
   // Physics loop: bounce off walls + bounce off each other + gently pull toward a grid anchor.
@@ -755,24 +942,27 @@ export function BoardPage() {
         const r = rById.get(id) ?? 50;
         const anchor = anchorById.get(id);
 
-        // spring toward anchor
-        const k = 2.2; // stronger = less overlap drift
+        // spring toward anchor (gentle pull so bubbles stay in zone)
+        const k = 1.8;
         if (anchor) {
           node.vx += (anchor.ax - node.x) * k * dt;
           node.vy += (anchor.ay - node.y) * k * dt;
         }
 
-        // gentle perpetual drift (time-based) so motion never damps to a full stop
+        // perpetual drift (Lissajous-ish, multi-frequency for organic feel)
         const hh = hash(workspaceId + id + "swirl");
         const phase = (hh % 1000) / 1000 * Math.PI * 2;
-        const amp = 18 + ((hh / 9) % 12); // px/s^2-ish
+        const amp = 30 + ((hh / 9) % 20); // stronger than before
         const tt = t / 1000;
-        node.vx += Math.sin(tt + phase) * amp * dt;
-        node.vy += Math.cos(tt * 0.9 + phase) * amp * dt;
+        node.vx += Math.sin(tt * 1.1 + phase) * amp * dt;
+        node.vy += Math.cos(tt * 0.85 + phase * 1.3) * amp * dt;
+        // secondary wobble
+        node.vx += Math.cos(tt * 0.6 + phase * 2.1) * (amp * 0.35) * dt;
+        node.vy += Math.sin(tt * 0.7 + phase * 0.7) * (amp * 0.35) * dt;
 
-        // damping (light) - keep it floaty, not stuck
-        node.vx *= 0.9985;
-        node.vy *= 0.9985;
+        // Very light damping — keep them lively
+        node.vx *= 0.997;
+        node.vy *= 0.997;
 
         node.x += node.vx * dt;
         node.y += node.vy * dt;
@@ -881,72 +1071,11 @@ export function BoardPage() {
     });
   };
 
-  const calendarDays = useMemo(() => {
-    const year = currentMonth.getFullYear();
-    const month = currentMonth.getMonth();
-    const firstDay = new Date(year, month, 1);
-    const lastDay = new Date(year, month + 1, 0);
-    const daysInMonth = lastDay.getDate();
-    const startingDay = firstDay.getDay(); // 0 = Sunday
-
-    const prevMonthLastDay = new Date(year, month, 0).getDate();
-    const days: Array<{ date: string; day: number; current: boolean; isToday: boolean }> = [];
-
-    // Padding from prev month
-    for (let i = startingDay - 1; i >= 0; i--) {
-      const d = new Date(year, month - 1, prevMonthLastDay - i);
-      days.push({
-        date: d.toISOString().split("T")[0],
-        day: d.getDate(),
-        current: false,
-        isToday: false,
-      });
-    }
-
-    // Current month
-    const todayStr = new Date().toISOString().split("T")[0];
-    for (let i = 1; i <= daysInMonth; i++) {
-      const dStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(i).padStart(2, "0")}`;
-      days.push({
-        date: dStr,
-        day: i,
-        current: true,
-        isToday: dStr === todayStr,
-      });
-    }
-
-    // Padding from next month
-    const totalSlots = 42; // 6 rows of 7 days
-    const nextMonthPadding = totalSlots - days.length;
-    for (let i = 1; i <= nextMonthPadding; i++) {
-      const d = new Date(year, month + 1, i);
-      days.push({
-        date: d.toISOString().split("T")[0],
-        day: d.getDate(),
-        current: false,
-        isToday: false,
-      });
-    }
-
-    return days;
-  }, [currentMonth]);
-
-  const tasksByDate = useMemo(() => {
-    const map = new Map<string, RowTask[]>();
-    tasks.forEach((t) => {
-      const d = t.due_date;
-      if (!d || t.is_asap) return;
-      if (!map.has(d)) map.set(d, []);
-      map.get(d)!.push(t);
-    });
-    return map;
-  }, [tasks]);
-
-  const asapTasks = useMemo(() => {
-    // Calendar lane: show only active ASAP tasks
-    return tasks
-      .filter((t) => Boolean(t.is_asap) && t.status !== "done")
-      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const anyFilterActive = urgencyFilter !== "all" || assignmentFilter !== "all" || companyFilter.size > 0;
+  const uniqueCompanies = useMemo(() => {
+    const set = new Set<string>();
+    tasks.forEach((t) => { if (t.company) set.add(t.company); });
+    return Array.from(set).sort();
   }, [tasks]);
 
   if (loading) {
@@ -960,839 +1089,720 @@ export function BoardPage() {
   }
 
   return (
-    <div className="boardScreen">
-      <div className="workspaceTitleStandalone">{workspace?.name ?? "Board"}</div>
-
-      <div className="boardHeader slim">
-        <div className="boardHeaderLeft">
-          <div className="kicker">Summary</div>
-          <div className="summaryDetails">
-            <div className="summaryItem">
-              <b>{members.length}</b> members
-            </div>
-            <div className="summaryDivider" />
-            <div className="summaryItem">
-              <b>{completedTodayCount}</b> completed today
-            </div>
-            {oldestTask && (
-              <>
-                <div className="summaryDivider" />
-                <div className="summaryItem">
-                  Oldest: <b>{oldestTask.title}</b> ({formatAgeHours(oldestTask.age_hours)})
-                </div>
-              </>
-            )}
+    <div className="bpScreen">
+      {/* ── Compact header ── */}
+      <div className="bpHeader">
+        <div className="bpHeaderLeft">
+          <div className="bpWsNameWrap">
+            <div className="bpWsName">{workspace?.name ?? "Board"}</div>
+            {allWorkspaces.length > 1 ? (
+              <button type="button" className="bpWsCaret" onClick={() => setWsDropOpen((v) => !v)} title="Switch workspace">
+                {wsDropOpen ? "▲" : "▼"}
+              </button>
+            ) : null}
+            {wsDropOpen ? (
+              <div className="bpWsDropdown">
+                {allWorkspaces.filter((w) => w.id !== workspaceId).map((w) => (
+                  <button key={w.id} type="button" className="bpWsDropItem"
+                    onClick={() => { setWsDropOpen(false); nav(`/w/${w.id}`); }}>
+                    {w.name}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="bpStats">
+            <span><b>{members.length}</b> members</span>
+            <span className="bpStatDot" />
+            <span><b>{activeTasks.length}</b> active</span>
+            <span className="bpStatDot" />
+            <span><b>{completedTodayCount}</b> done today</span>
           </div>
         </div>
-        <div className="boardHeaderRight">
-          <div className="memberRow fullList" title="Workspace members">
-            {members.map(({ profile, member }) => (
+        <div className="bpHeaderRight">
+          <div className="bpMembers">
+            {members.slice(0, 8).map(({ profile, member }) => (
               <div
                 key={member.user_id}
-                className="memberAvatar"
-                title={profile?.display_name || profile?.email || member.user_id}
-                style={{ ["--user-color" as any]: userColors.get(member.user_id) } as any}
+                className="bpMemberDot"
+                style={{ borderColor: userColors.get(member.user_id) || "rgba(255,255,255,0.2)" }}
+                onMouseEnter={(e) => {
+                  if (profile) {
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setHoverMember({ profile, rect });
+                  }
+                }}
+                onMouseLeave={() => setHoverMember((prev) => prev?.profile.id === profile?.id ? null : prev)}
               >
                 {initials(profile?.display_name ?? profile?.email ?? member.user_id)}
               </div>
             ))}
+            {members.length > 8 ? <div className="bpMemberMore">+{members.length - 8}</div> : null}
           </div>
-
-          <div className="viewDropdownWrapper" style={{ marginLeft: 12 }}>
-            <select
-              className="viewDropdownSelect"
-              value={viewMode}
-              onChange={(e) => setViewMode(e.target.value as any)}
-            >
-              <option value="board">Bubbles</option>
-              <option value="list">List</option>
-              <option value="people">People</option>
-              <option value="calendar">Calendar</option>
-            </select>
-          </div>
-
-          <button
-            className="secondaryBtn compact"
-            onClick={() => void load()}
-            type="button"
-            style={{ marginLeft: 8 }}
-          >
-            Refresh
-          </button>
         </div>
       </div>
 
-      {error ? <div className="toastError">{error}</div> : null}
+      {error ? <div className="profileToast profileToastError" style={{ margin: "0 auto 8px", maxWidth: 1320 }}>{error}</div> : null}
 
-      <div className="boardGrid3">
-        <div className="taskListPanel splitLists">
-          <div className="panelTitleRow">
-            <div className="panelTitle" style={{ margin: 0 }}>
-              Tasks
+      {/* ── Filter bar ── */}
+      <div className="bpFilters">
+        <div className="bpFilterRow">
+          {/* View switcher */}
+          <div className="bpFilterGroup">
+            <div className="bpFilterLabel">View</div>
+            <div className="bpViewTabs">
+              {([["board", "Bubbles"], ["kanban", "Kanban"], ["list", "List"], ["people", "People"]] as const).map(([v, label]) => (
+                <button
+                  key={v}
+                  type="button"
+                  className={`bpViewTab ${viewMode === v ? "active" : ""}`}
+                  onClick={() => setViewMode(v as any)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-            <div className="segmented">
+          </div>
+
+          <div className="bpFilterSep" />
+
+          {/* Urgency */}
+          <div className="bpFilterGroup">
+            <div className="bpFilterLabel">Urgency</div>
+            <div className="bpChipGroup">
+              {["all", "asap", "urgent"].map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  className={`bpChip ${urgencyFilter === v ? "active" : ""} ${v === "urgent" ? "danger" : ""}`}
+                  onClick={() => setUrgencyFilter(v as any)}
+                >
+                  {v === "all" ? "All" : v.charAt(0).toUpperCase() + v.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="bpFilterSep" />
+
+          {/* Assignment */}
+          <div className="bpFilterGroup">
+            <div className="bpFilterLabel">Assigned</div>
+            <div className="bpChipGroup">
               <button
                 type="button"
-                className={`segBtn ${sortKey === "due" ? "active" : ""}`}
-                onClick={() => onToggleSort("due")}
+                className={`bpChip ${assignmentFilter === "mine" ? "active" : ""}`}
+                onClick={() => setAssignmentFilter((v) => (v === "mine" ? "all" : "mine"))}
               >
-                Due {sortKey === "due" ? (sortDir === "asc" ? "↑" : "↓") : ""}
+                Mine
               </button>
               <button
                 type="button"
-                className={`segBtn ${sortKey === "title" ? "active" : ""}`}
-                onClick={() => onToggleSort("title")}
+                className={`bpChip ${assignmentFilter === "unassigned" ? "active" : ""}`}
+                onClick={() => setAssignmentFilter((v) => (v === "unassigned" ? "all" : "unassigned"))}
               >
-                Title{" "}
-                {sortKey === "title" ? (sortDir === "asc" ? "↑" : "↓") : ""}
+                Unassigned
               </button>
             </div>
           </div>
 
-          <input
-            className="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by title…"
-          />
-
-          <div className="taskGroup">
-            <div className="taskGroupHeader">
-              <div className="taskGroupTitle">Tasks</div>
-              <div className="muted">{activeTasks.length}</div>
-            </div>
-            <div className="taskScroll">
-              {activeTasks.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  className={`taskRow ${t.id === selectedId ? "active" : ""}`}
-                  onClick={() => setSelectedId(t.id)}
-                >
-                  <div className="taskRowTitle">{t.title}</div>
-                  <div className="taskRowMeta">
-                    <span className="chip">{formatAgeHours(t.age_hours)}</span>
-                    <span className="chip">{formatDue(t.due_date, t.is_asap)}</span>
-                    {t.company ? <span className="chip company">{t.company}</span> : null}
-                    {t.responsible_profile ? (
-                      <span className="chip responsible" title="Responsible">
-                        👤 {t.responsible_profile.display_name ?? t.responsible_profile.email}
-                      </span>
-                    ) : null}
-                  </div>
-                </button>
-              ))}
-              {activeTasks.length === 0 ? (
-                <div className="muted" style={{ padding: 10 }}>
-                  No tasks.
+          {/* Company chips */}
+          {uniqueCompanies.length > 0 ? (
+            <>
+              <div className="bpFilterSep" />
+              <div className="bpFilterGroup">
+                <div className="bpFilterLabel">Company</div>
+                <div className="bpChipGroup">
+                  {uniqueCompanies.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={`bpChip bpChipCo ${companyFilter.has(c) ? "active" : ""}`}
+                      onClick={() => toggleCompanyChip(c)}
+                    >
+                      {c}
+                    </button>
+                  ))}
                 </div>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="taskGroup">
-            <div className="taskGroupHeader">
-              <div className="taskGroupTitle">Complete</div>
-              <div className="muted">{completeTasks.length}</div>
-            </div>
-            <div className="taskScroll">
-              {completeTasks.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  className={`taskRow done ${t.id === selectedId ? "active" : ""}`}
-                  onClick={() => setSelectedId(t.id)}
-                >
-                  <div className="taskRowTitle">{t.title}</div>
-                  <div className="taskRowMeta">
-                    <span className="chip">{formatAgeHours(t.age_hours)}</span>
-                    <span className="chip">{formatDue(t.due_date, t.is_asap)}</span>
-                    {t.company ? <span className="chip company">{t.company}</span> : null}
-                    {t.responsible_profile ? (
-                      <span className="chip responsible" title="Responsible">
-                        👤 {t.responsible_profile.display_name ?? t.responsible_profile.email}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="taskRowCompletion">
-                    {t.completed_profile || t.completed_at ? (
-                      <div className="completionStamp">
-                        ✓ Completed {t.completed_at ? formatDateTime(t.completed_at) : ""}
-                        {t.completed_profile ? ` by ${t.completed_profile.display_name ?? t.completed_profile.email}` : ""}
-                      </div>
-                    ) : null}
-                  </div>
-                </button>
-              ))}
-              {completeTasks.length === 0 ? (
-                <div className="muted" style={{ padding: 10 }}>
-                  Nothing completed yet.
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
-
-        <div className="boardMain">
-          <div className="boardFilters">
-            <div className="boardFilterSet">
-              <span className="filterLabel">Urgency</span>
-              <div className="filterGroup">
-                {["all", "asap", "urgent", "soon", "later"].map((v) => (
-                  <button
-                    key={v}
-                    type="button"
-                    className={`filterChip ${v === "urgent" ? "danger" : ""} ${urgencyFilter === v ? "active" : ""}`}
-                    onClick={() => setUrgencyFilter(v as any)}
-                  >
-                    {v === "all" ? "ALL" : v.toUpperCase()}
-                  </button>
-                ))}
               </div>
-            </div>
+            </>
+          ) : null}
 
-            <div className="boardFilterSet">
-              <span className="filterLabel">Task Type</span>
-              <div className="filterGroup">
-                <button
-                  type="button"
-                  className={`filterChip ${assignmentFilter === "mine" ? "active" : ""}`}
-                  onClick={() => setAssignmentFilter(v => v === "mine" ? "all" : "mine")}
-                >
-                  MINE
-                </button>
-                <button
-                  type="button"
-                  className={`filterChip ${assignmentFilter === "unassigned" ? "active" : ""}`}
-                  onClick={() => setAssignmentFilter(v => v === "unassigned" ? "all" : "unassigned")}
-                >
-                  UNASSIGNED
-                </button>
-              </div>
-            </div>
+          <div style={{ flex: 1 }} />
 
-            <div className="boardFilterSet">
-              <span className="filterLabel">Company</span>
-              <div className="filterGroup">
-                {["BTB", "OTE", "TKO", "Panels", "Ursus"].map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    className={`filterChip ${companyFilter.has(c) ? "active" : ""}`}
-                    onClick={() => toggleCompanyChip(c)}
-                  >
-                    {c}
-                  </button>
-                ))}
-              </div>
-            </div>
-
+          {anyFilterActive ? (
             <button
               type="button"
-              className="filterReset"
+              className="bpChip bpChipReset"
               onClick={() => {
                 setUrgencyFilter("all");
                 setAssignmentFilter("all");
                 setCompanyFilter(new Set());
               }}
             >
-              RESET
+              Clear filters
             </button>
-          </div>
+          ) : null}
 
+          <button className="bpRefresh" onClick={() => void load()} type="button" title="Refresh">
+            &#8635;
+          </button>
+        </div>
+      </div>
+
+      {/* ── Main grid: canvas + sidebar ── */}
+      <div className="bpGrid">
+        <div className="bpCanvas">
           {viewMode === "board" ? (
             <div className="bubbleCanvas" ref={canvasRef}>
-            <div className="gridOverlay" aria-hidden="true" />
-
-          {layoutOrder.map((t) => {
-            const { size, color, u } = bubbleVisual(t);
-            const isPop = popping.has(t.id);
-            const urgent = u >= 0.15;
-            return (
-              <button
-                key={t.id}
-                ref={(node) => {
-                  if (!node) bubbleEls.current.delete(t.id);
-                  else {
-                    bubbleEls.current.set(t.id, node);
-                    // Avoid the "pile in the corner" when switching Calendar -> Board by painting
-                    // the last known physics position immediately (before next RAF tick).
-                    const simNode = sim.current.get(t.id);
-                    if (simNode) {
-                      const r = size / 2;
-                      node.style.setProperty("--x", `${simNode.x - r}px`);
-                      node.style.setProperty("--y", `${simNode.y - r}px`);
-                    }
-                  }
-                }}
-                className={`taskBubble ${urgent ? "urgent" : ""} ${t.id === selectedId ? "selected" : ""} ${isPop ? "popping" : ""}`}
-                onClick={() => setSelectedId(t.id)}
-                style={
-                  {
-                    width: `${size}px`,
-                    height: `${size}px`,
-                    ["--user-color" as never]: color,
-                    ["--urgency" as never]: u,
-                    ["--throbDur" as never]: `${Math.max(1.4, 6 - u * 4)}s`,
-                    ["--shakeDur" as never]: `${Math.max(0.6, 1.6 - u * 1.1)}s`,
-                  } as never
-                }
-                type="button"
-              >
-                <div className="bubbleInner">
-                  <div className="bubbleLabel">{t.title}</div>
-                  <div className="bubbleMeta">
-                    {t.company ? `${t.company} · ` : ""}
-                    {formatAgeHours(t.age_hours)} · {formatDue(t.due_date, t.is_asap)}
-                  </div>
-                </div>
-                </button>
-              );
-            })}
-
-            {layoutOrder.length === 0 ? (
-              <div className="emptyCenter">
-                <div className="emptyTitle">No tasks yet</div>
-                <div className="muted">Create a task and watch it float.</div>
-              </div>
-            ) : null}
-          </div>
-        ) : viewMode === "list" ? (
-          <div className="listViewCanvas">
-            <div className="listViewHeader">
-              <div className="listViewTitle">Task List</div>
-              <div className="muted">{filteredSorted.length} tasks</div>
-            </div>
-            <div className="listViewScroll">
-              {filteredSorted.map((t) => (
-                <div
-                  key={t.id}
-                  className={`listViewRow ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
-                  onClick={() => setSelectedId(t.id)}
-                >
-                  <div className="listViewStatus">
-                    <button
-                      type="button"
-                      className={`statusCircle ${t.status}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void setTaskStatus(t.id, t.status === "done" ? "open" : "done");
-                      }}
-                    >
-                      {t.status === "done" ? "✓" : ""}
-                    </button>
-                  </div>
-                  <div className="listViewContent">
-                    <div className="listViewMain">
-                      <div className="listViewTaskTitle">{t.title}</div>
-                      {t.is_asap && <span className="asapBadge">ASAP</span>}
-                    </div>
-                    <div className="listViewMeta">
-                      <span className="metaItem">📅 {formatDue(t.due_date, t.is_asap)}</span>
-                      <span className="metaItem">⏱️ {formatAgeHours(t.age_hours)}</span>
-                      {t.company && <span className="metaItem company">🏢 {t.company}</span>}
-                      {t.responsible_profile && (
-                        <span className="metaItem responsible">
-                          👤 {t.responsible_profile.display_name ?? t.responsible_profile.email}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="listViewChevron">›</div>
-                </div>
-              ))}
-              {filteredSorted.length === 0 && (
-                <div className="emptyCenter">
-                  <div className="emptyTitle">No tasks found</div>
-                  <div className="muted">Try adjusting your filters or search.</div>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : viewMode === "people" ? (
-          <div className="peopleViewCanvas">
-            <div className="peopleViewScroll horizontallyScrollable">
-              {members.map(({ profile, member }) => {
-                const personTasks = filteredSorted.filter(
-                  (t) => t.responsible_id === member.user_id
-                );
-                const color = userColors.get(member.user_id) || "var(--primary)";
-                
+              <div className="gridOverlay" aria-hidden="true" />
+              {layoutOrder.map((t) => {
+                const { size, color, u, isAsap } = bubbleVisual(t);
+                const isPop = popping.has(t.id);
+                const urgent = u >= 0.15;
+                const showFire = isAsap || u >= 0.85;
                 return (
-                  <div key={member.user_id} className="personColumn">
-                    <div className="personHeader" style={{ ["--user-color" as any]: color }}>
-                      <div className="personAvatar">
-                        {initials(profile?.display_name ?? profile?.email ?? member.user_id)}
-                      </div>
-                      <div className="personInfo">
-                        <div className="personName">
-                          {profile?.display_name ?? profile?.email?.split("@")[0] ?? "User"}
-                        </div>
-                        <div className="personTaskCount">{personTasks.length} tasks</div>
+                  <button
+                    key={t.id}
+                    ref={(node) => {
+                      if (!node) bubbleEls.current.delete(t.id);
+                      else {
+                        bubbleEls.current.set(t.id, node);
+                        const simNode = sim.current.get(t.id);
+                        if (simNode) {
+                          const r = size / 2;
+                          node.style.setProperty("--x", `${simNode.x - r}px`);
+                          node.style.setProperty("--y", `${simNode.y - r}px`);
+                        }
+                      }
+                    }}
+                    className={`taskBubble ${urgent ? "urgent" : ""} ${showFire ? "onFire" : ""} ${t.id === selectedId ? "selected" : ""} ${isPop ? "popping" : ""}`}
+                    onClick={() => setSelectedId(t.id)}
+                    style={
+                      {
+                        width: `${size}px`,
+                        height: `${size}px`,
+                        ["--user-color" as never]: color,
+                        ["--urgency" as never]: u,
+                        ["--throbDur" as never]: `${Math.max(1.0, 5 - u * 4)}s`,
+                        ["--shakeDur" as never]: `${Math.max(0.3, 1.2 - u * 1)}s`,
+                        ["--shakeAmp" as never]: `${(0.3 + u * 1.0).toFixed(1)}px`,
+                      } as never
+                    }
+                    type="button"
+                  >
+                    {/* Fire ring for ASAP / very urgent */}
+                    {showFire ? <div className="bubbleFireRing" aria-hidden="true" /> : null}
+                    <div className="bubbleInner">
+                      <div className="bubbleLabel">{t.title}</div>
+                      <div className="bubbleMeta">
+                        {t.company ? `${t.company} · ` : ""}
+                        {formatAgeHours(t.age_hours)} · {formatDue(t.due_date, t.is_asap)}
                       </div>
                     </div>
-                    <div className="personTasksScroll">
-                      {personTasks.map((t) => (
+                  </button>
+                );
+              })}
+              {layoutOrder.length === 0 ? (
+                <div className="emptyCenter">
+                  <div className="emptyTitle">No tasks yet</div>
+                  <div className="muted">Create a task and watch it float.</div>
+                </div>
+              ) : null}
+            </div>
+          ) : viewMode === "kanban" ? (
+            <div className="kanbanCanvas">
+              {(["open", "in_progress", "done"] as const).map((col) => {
+                const colTasks = filteredSorted.filter((t) => t.status === col);
+                const label = col === "open" ? "To Do" : col === "in_progress" ? "In Progress" : "Done";
+                return (
+                  <div
+                    key={col}
+                    className={`kanbanCol ${dragId ? "kanbanColDrop" : ""}`}
+                    onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("kanbanColOver"); }}
+                    onDragLeave={(e) => e.currentTarget.classList.remove("kanbanColOver")}
+                    onDrop={(e) => { e.currentTarget.classList.remove("kanbanColOver"); void onDropColumn(col); }}
+                  >
+                    <div className="kanbanColHead">
+                      <span className={`kanbanColDot kanbanDot-${col}`} />
+                      <span className="kanbanColLabel">{label}</span>
+                      <span className="kanbanColCount">{colTasks.length}</span>
+                    </div>
+                    <div className="kanbanColBody">
+                      {colTasks.map((t) => (
                         <div
                           key={t.id}
-                          className={`personTaskCard ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
+                          className={`kanbanCard ${t.id === selectedId ? "active" : ""}`}
+                          draggable
+                          onDragStart={() => onDragStart(t.id)}
+                          onDragEnd={() => setDragId(null)}
                           onClick={() => setSelectedId(t.id)}
                         >
-                          <div className="personTaskTitle">{t.title}</div>
-                          <div className="personTaskMeta">
-                            <span className="personTaskChip">{formatDue(t.due_date, t.is_asap)}</span>
-                            {t.company && <span className="personTaskChip company">{t.company}</span>}
+                          <div className="kanbanCardTitle">{t.title}</div>
+                          <div className="kanbanCardMeta">
+                            <span>{formatDue(t.due_date, t.is_asap)}</span>
+                            {t.company ? <><span className="bpStatDot" /><span>{t.company}</span></> : null}
+                            {t.responsible_profile ? (
+                              <><span className="bpStatDot" /><span>{t.responsible_profile.display_name ?? t.responsible_profile.email}</span></>
+                            ) : null}
                           </div>
                         </div>
                       ))}
-                      {personTasks.length === 0 && (
-                        <div className="personEmpty">No tasks assigned</div>
-                      )}
+                      {colTasks.length === 0 ? <div className="kanbanEmpty">Drop tasks here</div> : null}
                     </div>
                   </div>
                 );
               })}
-              
-              {/* Unassigned Column */}
-              {filteredSorted.some(t => !t.responsible_id) && (
-                <div className="personColumn unassigned">
-                  <div className="personHeader">
-                    <div className="personAvatar">?</div>
-                    <div className="personInfo">
-                      <div className="personName">Unassigned</div>
-                      <div className="personTaskCount">
-                        {filteredSorted.filter(t => !t.responsible_id).length} tasks
+            </div>
+          ) : viewMode === "list" ? (
+            <div className="listViewCanvas">
+              <div className="listViewHeader">
+                <div className="listViewTitle">Task List</div>
+                <div className="muted">{filteredSorted.length} tasks</div>
+              </div>
+              <div className="listViewScroll">
+                {filteredSorted.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`listViewRow ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
+                    onClick={() => setSelectedId(t.id)}
+                  >
+                    <div className="listViewStatus">
+                      <button
+                        type="button"
+                        className={`statusCircle ${t.status}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void setTaskStatus(t.id, t.status === "done" ? "open" : "done");
+                        }}
+                      >
+                        {t.status === "done" ? "✓" : ""}
+                      </button>
+                    </div>
+                    <div className="listViewContent">
+                      <div className="listViewMain">
+                        <div className="listViewTaskTitle">{t.title}</div>
+                        {t.is_asap && <span className="asapBadge">ASAP</span>}
+                      </div>
+                      <div className="listViewMeta">
+                        <span className="metaItem">{formatDue(t.due_date, t.is_asap)}</span>
+                        <span className="metaItem">{formatAgeHours(t.age_hours)}</span>
+                        {t.company && <span className="metaItem company">{t.company}</span>}
+                        {t.responsible_profile && (
+                          <span className="metaItem">
+                            {t.responsible_profile.display_name ?? t.responsible_profile.email}
+                          </span>
+                        )}
                       </div>
                     </div>
+                    <div className="listViewChevron">&#8250;</div>
                   </div>
-                  <div className="personTasksScroll">
-                    {filteredSorted
-                      .filter(t => !t.responsible_id)
-                      .map((t) => (
-                        <div
-                          key={t.id}
-                          className={`personTaskCard ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
-                          onClick={() => setSelectedId(t.id)}
-                        >
-                          <div className="personTaskTitle">{t.title}</div>
-                          <div className="personTaskMeta">
-                            <span className="personTaskChip">{formatDue(t.due_date, t.is_asap)}</span>
-                            {t.company && <span className="personTaskChip company">{t.company}</span>}
-                          </div>
+                ))}
+                {filteredSorted.length === 0 && (
+                  <div className="emptyCenter">
+                    <div className="emptyTitle">No tasks found</div>
+                    <div className="muted">Try adjusting your filters.</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : viewMode === "people" ? (
+            <div className="peopleViewCanvas">
+              <div className="peopleViewScroll horizontallyScrollable">
+                {members.map(({ profile, member }) => {
+                  const personTasks = filteredSorted.filter(
+                    (t) => t.responsible_id === member.user_id
+                  );
+                  const color = userColors.get(member.user_id) || "var(--primary)";
+                  
+                  return (
+                    <div key={member.user_id} className="personColumn">
+                      <div className="personHeader" style={{ ["--user-color" as any]: color }}>
+                        <div className="personAvatar">
+                          {initials(profile?.display_name ?? profile?.email ?? member.user_id)}
                         </div>
-                      ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="calendarCanvas">
-            <div className="calendarTop">
-              <div className="calendarMonthName">
-                {currentMonth.toLocaleString(undefined, {
-                  month: "long",
-                  year: "numeric",
-                })}
-              </div>
-              <div className="segmented">
-                <button
-                  className="segBtn"
-                  onClick={() =>
-                    setCurrentMonth(
-                      new Date(
-                        currentMonth.getFullYear(),
-                        currentMonth.getMonth() - 1,
-                        1,
-                      ),
-                    )
-                  }
-                >
-                  ←
-                </button>
-                <button className="segBtn" onClick={() => setCurrentMonth(new Date())}>
-                  Today
-                </button>
-                <button
-                  className="segBtn"
-                  onClick={() =>
-                    setCurrentMonth(
-                      new Date(
-                        currentMonth.getFullYear(),
-                        currentMonth.getMonth() + 1,
-                        1,
-                      ),
-                    )
-                  }
-                >
-                  →
-                </button>
-              </div>
-            </div>
-
-            {asapTasks.length ? (
-              <div className="asapLane" aria-label="ASAP tasks">
-                <div className="asapLaneHeader">
-                  <div className="asapLaneTitle">ASAP</div>
-                  <div className="muted">{asapTasks.length}</div>
-                </div>
-                <div className="asapLaneScroll">
-                  {asapTasks.map((t) => (
-                    <button
-                      key={t.id}
-                      type="button"
-                      className={`asapPill ${t.id === selectedId ? "active" : ""}`}
-                      onClick={() => setSelectedId(t.id)}
-                      style={
-                        {
-                          ["--user-color" as never]: t.responsible_id
-                            ? userColors.get(t.responsible_id)
-                            : "rgba(255,255,255,0.2)",
-                        } as never
-                      }
-                      title={
-                        t.responsible_profile
-                          ? `${t.title} (Responsible: ${t.responsible_profile.display_name ?? t.responsible_profile.email})`
-                          : t.title
-                      }
-                    >
-                      <span className="asapDot" aria-hidden="true" />
-                      <span className="asapText">{t.title}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            <div className="calendarGrid">
-              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
-                <div key={d} className="calendarDayHead">
-                  {d}
-                </div>
-              ))}
-              {calendarDays.map((day) => (
-                <div
-                  key={day.date}
-                  className={`calendarCell ${day.current ? "" : "otherMonth"} ${day.isToday ? "today" : ""}`}
-                >
-                  <div className="calendarDayNum">{day.day}</div>
-                  <div className="calendarTaskList">
-                    {(tasksByDate.get(day.date) || []).map((t) => (
-                      <div
-                        key={t.id}
-                        className={`calendarTask ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
-                        onClick={() => setSelectedId(t.id)}
-                        title={t.title}
-                      >
-                        {t.title}
+                        <div className="personInfo">
+                          <div className="personName">
+                            {profile?.display_name ?? profile?.email?.split("@")[0] ?? "User"}
+                          </div>
+                          <div className="personTaskCount">{personTasks.length} tasks</div>
+                        </div>
                       </div>
-                    ))}
+                      <div className="personTasksScroll">
+                        {personTasks.map((t) => (
+                          <div
+                            key={t.id}
+                            className={`personTaskCard ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
+                            onClick={() => setSelectedId(t.id)}
+                          >
+                            <div className="personTaskTitle">{t.title}</div>
+                            <div className="personTaskMeta">
+                              <span className="personTaskChip">{formatDue(t.due_date, t.is_asap)}</span>
+                              {t.company && <span className="personTaskChip company">{t.company}</span>}
+                            </div>
+                          </div>
+                        ))}
+                        {personTasks.length === 0 && (
+                          <div className="personEmpty">No tasks assigned</div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {filteredSorted.some(t => !t.responsible_id) && (
+                  <div className="personColumn unassigned">
+                    <div className="personHeader">
+                      <div className="personAvatar">?</div>
+                      <div className="personInfo">
+                        <div className="personName">Unassigned</div>
+                        <div className="personTaskCount">
+                          {filteredSorted.filter(t => !t.responsible_id).length} tasks
+                        </div>
+                      </div>
+                    </div>
+                    <div className="personTasksScroll">
+                      {filteredSorted
+                        .filter(t => !t.responsible_id)
+                        .map((t) => (
+                          <div
+                            key={t.id}
+                            className={`personTaskCard ${t.id === selectedId ? "active" : ""} ${t.status === "done" ? "done" : ""}`}
+                            onClick={() => setSelectedId(t.id)}
+                          >
+                            <div className="personTaskTitle">{t.title}</div>
+                            <div className="personTaskMeta">
+                              <span className="personTaskChip">{formatDue(t.due_date, t.is_asap)}</span>
+                              {t.company && <span className="personTaskChip company">{t.company}</span>}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* ── Resize handle ── */}
+        <div className="bpResizeHandle" onMouseDown={onResizeStart} title="Drag to resize" />
+
+        {/* ── Sidebar ── */}
+        <div className="bpSidebar" style={{ width: sidebarWidth, minWidth: 280, maxWidth: 600, flexShrink: 0 }}>
+          <div className="bpSidebarTabs">
+            <button
+              className={`bpSideTab ${sidebarMode === "list" ? "active" : ""}`}
+              onClick={() => setSidebarMode("list")}
+            >
+              Tasks
+            </button>
+            <button
+              className={`bpSideTab ${sidebarMode === "details" ? "active" : ""} ${!selected ? "disabled" : ""}`}
+              onClick={() => selected && setSidebarMode("details")}
+              disabled={!selected}
+            >
+              Details
+            </button>
+            <button
+              className={`bpSideTab ${sidebarMode === "create" ? "active" : ""}`}
+              onClick={() => setSidebarMode("create")}
+            >
+              + New
+            </button>
+          </div>
+
+          <div className="bpSideBody">
+            {sidebarMode === "list" && (
+              <>
+                <div className="bpSideControls">
+                  <div className="segmented">
+                    <button type="button" className={`segBtn ${sortKey === "due" ? "active" : ""}`} onClick={() => onToggleSort("due")}>
+                      Due {sortKey === "due" ? (sortDir === "asc" ? "↑" : "↓") : ""}
+                    </button>
+                    <button type="button" className={`segBtn ${sortKey === "title" ? "active" : ""}`} onClick={() => onToggleSort("title")}>
+                      Title {sortKey === "title" ? (sortDir === "asc" ? "↑" : "↓") : ""}
+                    </button>
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+                <input
+                  className="bpSearch"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search tasks…"
+                />
+                <div className="bpTaskSection">
+                  <div className="bpTaskSectionHead">
+                    <span>Active</span><span className="bpTaskSectionCount">{activeTasks.length}</span>
+                  </div>
+                  <div className="bpTaskScroll">
+                    {activeTasks.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        className={`bpTaskRow ${t.id === selectedId ? "active" : ""}`}
+                        onClick={() => setSelectedId(t.id)}
+                      >
+                        <div className="bpTaskRowTitle">{t.title}</div>
+                        <div className="bpTaskRowMeta">
+                          <span className="bpTaskChip">{formatDue(t.due_date, t.is_asap)}</span>
+                          {t.company ? <span className="bpTaskChip co">{t.company}</span> : null}
+                        </div>
+                      </button>
+                    ))}
+                    {activeTasks.length === 0 && <div className="muted" style={{ padding: 12 }}>No active tasks.</div>}
+                  </div>
+                </div>
+                <div className="bpTaskSection">
+                  <div className="bpTaskSectionHead">
+                    <span>Complete</span><span className="bpTaskSectionCount">{completeTasks.length}</span>
+                  </div>
+                  <div className="bpTaskScroll">
+                    {completeTasks.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        className={`bpTaskRow done ${t.id === selectedId ? "active" : ""}`}
+                        onClick={() => setSelectedId(t.id)}
+                      >
+                        <div className="bpTaskRowTitle">{t.title}</div>
+                        <div className="bpTaskRowMeta">
+                          <span className="bpTaskChip">{formatDue(t.due_date, t.is_asap)}</span>
+                        </div>
+                      </button>
+                    ))}
+                    {completeTasks.length === 0 && <div className="muted" style={{ padding: 12 }}>Nothing yet.</div>}
+                  </div>
+                </div>
+              </>
+            )}
 
-      <div className="sidePanel">
-        <div className="sideCard">
-            <div className="panelTitleRow">
-              <div className="panelTitle">Details</div>
-              {selected && !isEditing ? (
+            {sidebarMode === "details" && selected && (
+              <div className="bpDetailCard">
+                <div className="bpDetailTop">
+                  <div className={`statusPill ${selected.status}`}>
+                    {selected.status === "done" ? "✓ Complete" : "○ Active"}
+                  </div>
+                  {urgencyLevel(selected) >= 0.7 && selected.status !== "done" && (
+                    <div className="urgentPill">Urgent</div>
+                  )}
+                  {!isEditing && (
+                    <button className="bpChip" style={{ marginLeft: "auto" }} onClick={() => setIsEditing(true)}>Edit</button>
+                  )}
+                </div>
+
+                {isEditing ? (
+                  <div className="bpEditForm">
+                    <label className="field"><div className="fieldLabel">Title</div>
+                      <input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} /></label>
+                    <label className="field"><div className="fieldLabel">Due date</div>
+                      <input value={editDueDate} onChange={(e) => setEditDueDate(e.target.value)} type="date" disabled={editAsap} /></label>
+                    <label className="field" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <input type="checkbox" checked={editAsap} onChange={(e) => setEditAsap(e.target.checked)} style={{ width: "auto" }} />
+                      <span className="fieldLabel" style={{ margin: 0 }}>ASAP</span></label>
+                    <label className="field"><div className="fieldLabel">Description</div>
+                      <textarea value={editDescription} onChange={(e) => setEditDescription(e.target.value)} rows={3} /></label>
+                    <label className="field"><div className="fieldLabel">Responsible</div>
+                      <select value={editResponsibleId} onChange={(e) => setEditResponsibleId(e.target.value)}>
+                        <option value="">Any</option>
+                        {members.map(({ profile, member }) => (
+                          <option key={member.user_id} value={member.user_id}>
+                            {profile?.display_name ?? profile?.email ?? member.user_id}
+                          </option>
+                        ))}
+                      </select></label>
+                    <label className="field"><div className="fieldLabel">Company</div>
+                      <select value={editCompany} onChange={(e) => setEditCompany(e.target.value)}>
+                        <option value="">Select…</option>
+                        {COMPANY_PRESETS.map((c) => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select></label>
+                    {editCompany === "Other" ? (
+                      <label className="field"><div className="fieldLabel">Custom Company</div>
+                        <input value={editCustomCompany} onChange={(e) => setEditCustomCompany(e.target.value)} placeholder="Enter company name" /></label>
+                    ) : null}
+                    <div className="bpEditActions">
+                      <button className="primaryBtn" onClick={updateTask} disabled={busy}>Save</button>
+                      <button className="bpChip" onClick={() => setIsEditing(false)}>Cancel</button>
+                      <div style={{ flex: 1 }} />
+                      <button className="adminDeleteBtn" onClick={deleteTask}>Delete</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="bpDetailTitle">{selected.title}</div>
+                    <div className="bpDetailChips">
+                      <span className="bpDetailChip bpDetailChipDue">
+                        <span className="bpDetailChipIcon">&#128197;</span>
+                        {formatDue(selected.due_date, selected.is_asap)}
+                      </span>
+                      {selected.company ? (
+                        <span className="bpDetailChip bpDetailChipCompany">
+                          <span className="bpDetailChipIcon">&#127970;</span>
+                          {selected.company}
+                        </span>
+                      ) : null}
+                      {selected.responsible_profile ? (
+                        <span className="bpDetailChip bpDetailChipPerson" style={{ borderColor: userColors.get(selected.responsible_id ?? "") ?? "var(--border)" }}>
+                          <span className="bpDetailChipIcon">&#128100;</span>
+                          {selected.responsible_profile.display_name ?? selected.responsible_profile.email}
+                        </span>
+                      ) : null}
+                      <span className={`bpDetailChip bpDetailChipStatus ${selected.status}`}>
+                        {selected.status === "done" ? "✓ Done" : selected.status === "in_progress" ? "◐ In Progress" : "○ Open"}
+                      </span>
+                    </div>
+                    {selected.description ? <div className="bpDetailDesc">{selected.description}</div> : null}
+                    <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {selected.status === "done" ? (
+                        <button className="secondaryBtn" onClick={() => void setTaskStatus(selected.id, "open")}>Reopen</button>
+                      ) : (
+                        <button className="primaryBtn" onClick={() => void setTaskStatus(selected.id, "done")}>Mark complete</button>
+                      )}
+                    </div>
+
+                    {/* Comments */}
+                    <div className="bpCommentsSection">
+                      <div className="bpCommentsSectionHead">
+                        <span>Comments</span>
+                        <span className="bpTaskSectionCount">{comments.length}</span>
+                      </div>
+                      {commentsLoading ? <div className="muted" style={{ padding: 8, fontSize: 12 }}>Loading…</div> : (
+                        <div className="bpCommentsList">
+                          {comments.map((c) => (
+                            <div key={c.id} className="bpCommentRow">
+                              <div className="bpCommentAvatar">
+                                {initials(c.profile?.display_name ?? c.profile?.email ?? "U")}
+                              </div>
+                              <div className="bpCommentBody">
+                                <div className="bpCommentMeta">
+                                  <span className="bpCommentAuthor">{c.profile?.display_name ?? c.profile?.email?.split("@")[0] ?? "User"}</span>
+                                  <span className="bpCommentTime">{new Date(c.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+                                </div>
+                                <div className="bpCommentText">{c.body}</div>
+                              </div>
+                            </div>
+                          ))}
+                          {comments.length === 0 && !commentsLoading ? <div className="muted" style={{ padding: 8, fontSize: 12 }}>No comments yet.</div> : null}
+                          <div ref={commentsEndRef} />
+                        </div>
+                      )}
+                      <div className="bpCommentComposer">
+                        <input className="bpCommentInput" value={commentBody} onChange={(e) => setCommentBody(e.target.value)}
+                          placeholder="Add a comment…" onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void addComment(); } }} disabled={commentSending} />
+                        <button className="bpCommentSend" type="button" onClick={() => void addComment()} disabled={commentSending || !commentBody.trim()}>
+                          {commentSending ? "…" : "Send"}
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {sidebarMode === "create" && (
+              <div className="bpDetailCard">
+                <div className="bpDetailTitle" style={{ marginBottom: 12 }}>New Task</div>
+                <label className="field"><div className="fieldLabel">Title</div>
+                  <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Task title…" /></label>
+                <label className="field"><div className="fieldLabel">Due date</div>
+                  <input value={dueDate} onChange={(e) => setDueDate(e.target.value)} type="date" disabled={asap} /></label>
+                <label className="field" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <input type="checkbox" checked={asap} onChange={(e) => setAsap(e.target.checked)} style={{ width: "auto" }} />
+                  <span className="fieldLabel" style={{ margin: 0 }}>ASAP</span></label>
+                <label className="field"><div className="fieldLabel">Description</div>
+                  <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} /></label>
+                <label className="field"><div className="fieldLabel">Responsible</div>
+                  <select value={responsibleId} onChange={(e) => setResponsibleId(e.target.value)}>
+                    <option value="">Any</option>
+                    {members.map(({ profile, member }) => (
+                      <option key={member.user_id} value={member.user_id}>
+                        {profile?.display_name ?? profile?.email ?? member.user_id}
+                      </option>
+                    ))}
+                  </select></label>
+                <label className="field"><div className="fieldLabel">Company</div>
+                  <select value={company} onChange={(e) => setCompany(e.target.value)}>
+                    <option value="">Select…</option>
+                    {COMPANY_PRESETS.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select></label>
+                {company === "Other" ? (
+                  <label className="field"><div className="fieldLabel">Custom Company</div>
+                    <input value={customCompany} onChange={(e) => setCustomCompany(e.target.value)} placeholder="Enter company name" /></label>
+                ) : null}
                 <button
-                  className="secondaryBtn compact"
-                  onClick={() => setIsEditing(true)}
-                  type="button"
+                  className="primaryBtn btnFull"
+                  style={{ marginTop: 10 }}
+                  onClick={async () => { await createTask(); setSidebarMode("list"); }}
+                  disabled={creating || !title.trim()}
                 >
-                  Edit
+                  {creating ? "Creating…" : "Add task"}
                 </button>
+              </div>
+            )}
+
+            {/* Audit log toggle */}
+            <div style={{ marginTop: "auto", paddingTop: 12, borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              <button className="bpChip" style={{ width: "100%", justifyContent: "center" }} type="button"
+                onClick={() => { setShowAudit((v) => !v); if (!showAudit) void loadAuditLog(); }}>
+                {showAudit ? "Hide" : "Show"} Activity Log
+              </button>
+              {showAudit ? (
+                <div className="bpAuditList">
+                  {auditLoading ? <div className="muted" style={{ padding: 8, fontSize: 12 }}>Loading…</div> : null}
+                  {auditLog.map((e) => {
+                    const who = e.actor_profile?.display_name ?? e.actor_profile?.email?.split("@")[0] ?? "System";
+                    const actionMap: Record<string, string> = {
+                      task_created: "created a task",
+                      task_updated: "updated a task",
+                      task_deleted: "deleted a task",
+                      task_completed: "completed a task",
+                      task_reopened: "reopened a task",
+                      task_assigned: "assigned a task",
+                      comment_added: "commented",
+                      member_joined: "joined",
+                      member_removed: "was removed",
+                    };
+                    const detail = (e.details as any)?.title ? `"${(e.details as any).title}"` : "";
+                    return (
+                      <div key={e.id} className="bpAuditRow">
+                        <div className="bpAuditText"><b>{who}</b> {actionMap[e.action] ?? e.action} {detail}</div>
+                        <div className="bpAuditTime">{new Date(e.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</div>
+                      </div>
+                    );
+                  })}
+                  {!auditLoading && auditLog.length === 0 ? <div className="muted" style={{ padding: 8, fontSize: 12 }}>No activity recorded yet.</div> : null}
+                </div>
               ) : null}
             </div>
-
-            {selected ? (
-              isEditing ? (
-                <div className="editForm">
-                  <label className="field">
-                    <div className="fieldLabel">Title</div>
-                    <input
-                      value={editTitle}
-                      onChange={(e) => setEditTitle(e.target.value)}
-                      placeholder="Title"
-                    />
-                  </label>
-                  <label className="field">
-                    <div className="fieldLabel">Due date</div>
-                    <input
-                      value={editDueDate}
-                      onChange={(e) => setEditDueDate(e.target.value)}
-                      type="date"
-                      disabled={editAsap}
-                    />
-                  </label>
-                  <label className="field" style={{ marginTop: -6 }}>
-                    <div className="row" style={{ gap: 10, alignItems: "center" }}>
-                      <input
-                        type="checkbox"
-                        checked={editAsap}
-                        onChange={(e) => setEditAsap(e.target.checked)}
-                        style={{ width: 18, height: 18 }}
-                      />
-                      <div className="fieldLabel" style={{ margin: 0 }}>
-                        ASAP (no due date)
-                      </div>
-                    </div>
-                  </label>
-                  <label className="field">
-                    <div className="fieldLabel">Description</div>
-                    <textarea
-                      value={editDescription}
-                      onChange={(e) => setEditDescription(e.target.value)}
-                      rows={4}
-                    />
-                  </label>
-                  <label className="field">
-                    <div className="fieldLabel">Person Responsible</div>
-                    <select
-                      value={editResponsibleId}
-                      onChange={(e) => setEditResponsibleId(e.target.value)}
-                    >
-                      <option value="">Any</option>
-                      {members.map(({ profile, member }) => (
-                        <option key={member.user_id} value={member.user_id}>
-                          {profile?.display_name ?? profile?.email ?? member.user_id}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="field">
-                    <div className="fieldLabel">Company</div>
-                    <select
-                      value={editCompany}
-                      onChange={(e) => setEditCompany(e.target.value)}
-                    >
-                      <option value="">N/A</option>
-                      {["BTB", "OTE", "TKO", "Panels", "Ursus"].map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="row" style={{ marginTop: 14 }}>
-                    <button
-                      className="primaryBtn"
-                      onClick={updateTask}
-                      disabled={busy || !editTitle.trim() || (!editAsap && !editDueDate)}
-                      type="button"
-                    >
-                      Save
-                    </button>
-                    <button
-                      className="secondaryBtn"
-                      onClick={() => setIsEditing(false)}
-                      disabled={busy}
-                      type="button"
-                    >
-                      Cancel
-                    </button>
-                    <div className="spacer" />
-                    <button
-                      className="secondaryBtn"
-                      onClick={deleteTask}
-                      disabled={busy}
-                      style={{ color: "var(--danger)" }}
-                      type="button"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <div className="statusBadgeRow">
-                    <div className={`statusPill ${selected.status}`}>
-                      {selected.status === "done" ? "✓ Complete" : "○ In Progress"}
-                    </div>
-                    {urgencyLevel(selected) >= 0.7 && selected.status !== "done" ? (
-                      <div className="urgentPill">🔥 Urgent</div>
-                    ) : null}
-                  </div>
-                  <div className="titleLg">{selected.title}</div>
-                  <div className="muted" style={{ marginBottom: 12 }}>
-                    Due {selected.due_date} 
-                    {selected.company ? ` · for ${selected.company}` : ""}
-                  </div>
-
-                  <div className="tagRow">
-                    {selected.is_asap ? <span className="tagChip">ASAP</span> : null}
-                    {selected.company ? (
-                      <span className="tagChip company">{selected.company}</span>
-                    ) : (
-                      <span className="tagChip">Company: N/A</span>
-                    )}
-                    {selected.responsible_profile ? (
-                      <span className="tagChip">
-                        👤 {selected.responsible_profile.display_name ?? selected.responsible_profile.email}
-                      </span>
-                    ) : (
-                      <span className="tagChip">Responsible: Any</span>
-                    )}
-                  </div>
-
-                  <div className="taskMetricsRow">
-                    <div className="metricBox">
-                      <div className="metricLabel">Time Alive</div>
-                      <div className="metricValue">{formatAgeHours(selected.age_hours)}</div>
-                    </div>
-                    {selected.responsible_profile && (
-                      <div className="metricBox">
-                        <div className="metricLabel">Person Responsible</div>
-                        <div className="metricValue" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <div className="avatarCircle sm">
-                            {initials(selected.responsible_profile.display_name ?? selected.responsible_profile.email ?? "")}
-                          </div>
-                          {selected.responsible_profile.display_name ?? selected.responsible_profile.email}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {selected.status === "done" && (
-                    <div className="completionHero">
-                      <div className="heroLabel">Completion Details</div>
-                      <div className="heroGrid">
-                        <div className="heroItem">
-                          <div className="heroKey">Finished on</div>
-                          <div className="heroVal">
-                            {selected.completed_at
-                              ? formatDateTime(selected.completed_at)
-                              : "—"}
-                          </div>
-                        </div>
-                        <div className="heroItem">
-                          <div className="heroKey">Completed by</div>
-                          <div className="heroVal">
-                            {selected.completed_profile
-                              ? selected.completed_profile.display_name ??
-                                selected.completed_profile.email
-                              : "Unknown"}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="sideBody">{selected.description}</div>
-
-                  <div className="row" style={{ marginTop: 14 }}>
-                    {selected.status === "done" ? (
-                      <button
-                        className="secondaryBtn"
-                        type="button"
-                        onClick={() => void setTaskStatus(selected.id, "open")}
-                      >
-                        Reopen
-                      </button>
-                    ) : (
-                      <button
-                        className="primaryBtn"
-                        type="button"
-                        onClick={() => void setTaskStatus(selected.id, "done")}
-                      >
-                        Mark complete
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )
-            ) : (
-              <div className="muted">Click a bubble to see details.</div>
-            )}
-          </div>
-
-          <div className="sideCard">
-            <div className="panelTitle">Create a task</div>
-            <div ref={createRef} />
-            <label className="field">
-              <div className="fieldLabel">Title</div>
-              <input
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Ship the new landing page"
-              />
-            </label>
-            <label className="field">
-              <div className="fieldLabel">Due date</div>
-              <input
-                value={dueDate}
-                onChange={(e) => setDueDate(e.target.value)}
-                type="date"
-                disabled={asap}
-              />
-            </label>
-            <label className="field" style={{ marginTop: -6 }}>
-              <div className="row" style={{ gap: 10, alignItems: "center" }}>
-                <input
-                  type="checkbox"
-                  checked={asap}
-                  onChange={(e) => setAsap(e.target.checked)}
-                  style={{ width: 18, height: 18 }}
-                />
-                <div className="fieldLabel" style={{ margin: 0 }}>
-                  ASAP (no due date)
-                </div>
-              </div>
-            </label>
-            <label className="field">
-              <div className="fieldLabel">Description</div>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={4}
-              />
-            </label>
-            <label className="field">
-              <div className="fieldLabel">Person Responsible</div>
-              <select
-                value={responsibleId}
-                onChange={(e) => setResponsibleId(e.target.value)}
-              >
-                <option value="">Any</option>
-                {members.map(({ profile, member }) => (
-                  <option key={member.user_id} value={member.user_id}>
-                    {profile?.display_name ?? profile?.email ?? member.user_id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <div className="fieldLabel">Company</div>
-              <select
-                value={company}
-                onChange={(e) => setCompany(e.target.value)}
-              >
-                <option value="">N/A</option>
-                {["BTB", "OTE", "TKO", "Panels", "Ursus"].map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              className="primaryBtn"
-              onClick={createTask}
-              type="button"
-              disabled={
-                creating || !title.trim() || (!asap && !dueDate) || !description.trim()
-              }
-            >
-              {creating ? "Creating…" : "Add bubble"}
-            </button>
           </div>
         </div>
       </div>
+
+      {/* ── Member hover popup ── */}
+      {hoverMember && (() => {
+        const popW = 170;
+        const popLeft = Math.min(Math.max(8, hoverMember.rect.left + hoverMember.rect.width / 2), window.innerWidth - popW / 2 - 8);
+        const fitsBelow = hoverMember.rect.bottom + 160 < window.innerHeight;
+        const popTop = fitsBelow ? hoverMember.rect.bottom + 6 : hoverMember.rect.top - 6;
+        const transformOrigin = fitsBelow ? "top center" : "bottom center";
+        return (
+          <div
+            className="cMemberPopup"
+            style={{ top: popTop, left: popLeft, transformOrigin, ...(fitsBelow ? {} : { transform: "translateX(-50%) translateY(-100%)" }) }}
+            onMouseEnter={() => {/* keep open */}}
+            onMouseLeave={() => setHoverMember(null)}
+          >
+            <div className="cMemberPopupDot" style={{ borderColor: hoverMember.profile.user_color || "#72c8ff" }}>
+              {initials(hoverMember.profile.display_name ?? hoverMember.profile.email ?? "U")}
+            </div>
+            <div className="cMemberPopupName">{hoverMember.profile.display_name || hoverMember.profile.email?.split("@")[0] || "User"}</div>
+            {hoverMember.profile.email && <div className="cMemberPopupEmail">{hoverMember.profile.email}</div>}
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -27,4 +27,8 @@ pnpm-debug.log*
 .vscode/
 .idea/
 
+# local scratch files
+web/full_app_css.txt
+web/original_app_css.txt
+
 

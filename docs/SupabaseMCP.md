@@ -23,3 +23,4 @@ Example (global) config:
 After adding it, restart Cursor and complete the Supabase OAuth prompt.
 
 
+
