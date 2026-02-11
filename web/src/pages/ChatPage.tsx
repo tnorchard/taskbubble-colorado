@@ -461,6 +461,17 @@ export function ChatPage() {
     prevMsgCount.current = count;
   }, [messages.length, dmMessages.length, threadMessages.length, view.kind]);
 
+  /* ── Scroll to bottom whenever the active view changes ── */
+  const prevView = useRef<string>("");
+  useEffect(() => {
+    const viewKey = view.kind === "channel" ? `ch:${view.wsId}` : view.kind === "dm" ? `dm:${view.partnerId}` : `th:${view.threadId}`;
+    if (prevView.current !== viewKey && prevView.current !== "") {
+      // View changed - scroll after messages load
+      setTimeout(() => snapToBottom(), 150);
+    }
+    prevView.current = viewKey;
+  }, [view]);
+
   /* ── Keep channel members in sync when allUsers loads ── */
   useEffect(() => {
     if (view.kind === "channel" && allUsers.length > 0) {
