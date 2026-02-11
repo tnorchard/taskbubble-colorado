@@ -4,17 +4,32 @@ import { getSupabase } from "../lib/supabaseClient";
 
 type Mode = "signin" | "signup" | "forgot" | "reset";
 
-export function AuthPage() {
+interface AuthPageProps {
+  passwordRecovery?: boolean;
+  onRecoveryDone?: () => void;
+}
+
+export function AuthPage({ passwordRecovery, onRecoveryDone }: AuthPageProps = {}) {
   const supabase = getSupabase();
   const [searchParams] = useSearchParams();
   const location = useLocation();
 
-  // Detect password recovery from Supabase email link
-  const isRecovery = location.hash.includes("type=recovery") || searchParams.get("type") === "recovery";
+  // Detect errors from Supabase redirect (e.g. expired link)
+  const hashError = useMemo(() => {
+    const hash = location.hash;
+    if (hash.includes("error=")) {
+      const params = new URLSearchParams(hash.replace("#", ""));
+      const desc = params.get("error_description");
+      if (desc) return desc.replace(/\+/g, " ");
+      return params.get("error") || null;
+    }
+    return null;
+  }, [location.hash]);
 
   const [mode, setMode] = useState<Mode>(() => {
-    if (isRecovery) return "reset";
+    if (passwordRecovery) return "reset";
     const m = searchParams.get("mode");
+    if (m === "reset") return "reset";
     if (m === "signup") return "signup";
     return "signin";
   });
@@ -28,10 +43,20 @@ export function AuthPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  // Switch to reset mode when recovery is detected
+  // Switch to reset mode when PASSWORD_RECOVERY event fires
   useEffect(() => {
-    if (isRecovery) setMode("reset");
-  }, [isRecovery]);
+    if (passwordRecovery) setMode("reset");
+  }, [passwordRecovery]);
+
+  // Show Supabase redirect errors (e.g. expired link)
+  useEffect(() => {
+    if (hashError) {
+      setError(hashError === "Email link is invalid or has expired"
+        ? "This password reset link has expired. Please request a new one below."
+        : hashError);
+      setMode("forgot");
+    }
+  }, [hashError]);
 
   // Reset messages when switching modes
   useEffect(() => { setError(null); setSuccess(null); }, [mode]);
@@ -70,6 +95,7 @@ export function AuthPage() {
         const { error: e } = await supabase.auth.updateUser({ password });
         if (e) throw e;
         setSuccess("Password updated! Redirecting to your workspaces…");
+        onRecoveryDone?.();
         setTimeout(() => { window.location.href = "/workspaces"; }, 1500);
         return;
       }

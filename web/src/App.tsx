@@ -14,6 +14,7 @@ import type { Notification } from "./types";
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [loadingSession, setLoadingSession] = useState(true);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   useEffect(() => {
     if (!isSupabaseConfigured) { setLoadingSession(false); return; }
@@ -25,7 +26,13 @@ export default function App() {
       setSession(data.session ?? null);
       setLoadingSession(false);
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, nextSession) => { setSession(nextSession); });
+    const { data: sub } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (!isMounted) return;
+      setSession(nextSession);
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordRecovery(true);
+      }
+    });
     return () => { isMounted = false; sub.subscription.unsubscribe(); };
   }, []);
 
@@ -41,10 +48,10 @@ export default function App() {
 
   if (loadingSession) return <div className="page"><div className="card">Loading…</div></div>;
 
-  return <AuthedRouter session={session} />;
+  return <AuthedRouter session={session} passwordRecovery={passwordRecovery} onRecoveryDone={() => setPasswordRecovery(false)} />;
 }
 
-function AuthedRouter({ session }: { session: Session | null }) {
+function AuthedRouter({ session, passwordRecovery, onRecoveryDone }: { session: Session | null; passwordRecovery: boolean; onRecoveryDone: () => void }) {
   const supabase = getSupabase();
   const nav = useNavigate();
   const loc = useLocation();
@@ -54,17 +61,19 @@ function AuthedRouter({ session }: { session: Session | null }) {
   // Public routes (landing + auth) — accessible without session
   const isPublicRoute = loc.pathname === "/" || loc.pathname === "/auth";
 
-  // Don't redirect away from /auth if there's a recovery hash (password reset flow)
-  const isRecovery = loc.pathname === "/auth" && (loc.hash.includes("type=recovery") || loc.search.includes("type=recovery"));
+  // If PASSWORD_RECOVERY event fired, redirect to the reset form
+  if (passwordRecovery && loc.pathname !== "/auth") {
+    return <Navigate to="/auth?mode=reset" replace />;
+  }
 
   // Redirect authenticated users away from public pages (unless password recovery)
-  if (session && isPublicRoute && !isRecovery) return <Navigate to="/workspaces" replace />;
+  if (session && isPublicRoute && !passwordRecovery) return <Navigate to="/workspaces" replace />;
 
   return (
     <Routes>
       {/* Public */}
       <Route path="/" element={<LandingPage />} />
-      <Route path="/auth" element={<AuthPage />} />
+      <Route path="/auth" element={<AuthPage passwordRecovery={passwordRecovery} onRecoveryDone={onRecoveryDone} />} />
       {/* Authenticated */}
       <Route path="/workspaces" element={session ? <AuthedFrame onSignOut={signOut}><WorkspacesPage /></AuthedFrame> : <Navigate to="/auth" replace />} />
       <Route path="/w/:id" element={session ? <AuthedFrame onSignOut={signOut}><BoardPage /></AuthedFrame> : <Navigate to="/auth" replace />} />
